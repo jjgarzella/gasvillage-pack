@@ -1,0 +1,36 @@
+# Gas Village — a lightweight Gas City pack.
+#
+# Three roles only:
+#   mayor    — city-scoped, always-on coordinator (sleeps after 30m idle).
+#   crew     — rig-scoped, user-named, persistent. Replicates a vanilla
+#              Claude Code session with bead/mail awareness. Spun up by
+#              declaring an [[agent]] inline in city.toml.
+#   polecat  — rig-scoped, ephemeral worker pool. Slung via `gc sling`,
+#              scales 0–5, idle_timeout 2h.
+#
+# Where Gas Town optimizes for parallel-agent velocity, Gas Village
+# optimizes for approachability and a low token floor. For newcomers
+# who don't want to juggle 7 sessions at once.
+#
+# Referenced by both workspace.pack and rigs[].pack:
+#   workspace.pack → expands city-scoped agents only (mayor)
+#   rigs[].pack    → expands rig agents only (polecat)
+#
+# Crew members are NOT pack-stamped — each is declared inline in
+# city.toml so the human chooses the name. See README.md.
+
+[pack]
+name = "gasvillage"
+schema = 2
+
+[global]
+# Slim session-live hook: mouse + clipboard + minimal status bar.
+# No tmux-keybindings.sh — Gas Village stays approachable.
+session_live = [
+    "{{.ConfigDir}}/assets/scripts/tmux-theme.sh {{.Session}} {{.Agent}} {{.ConfigDir}}",
+]
+
+[[named_session]]
+template = "mayor"
+scope = "city"
+mode = "always"

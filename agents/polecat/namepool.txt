@@ -1,0 +1,26 @@
+# Default polecat namepool — generic, neutral names.
+# Cities may override by placing a local namepool.txt in an overlay.
+ash
+birch
+cedar
+dune
+ember
+flint
+grove
+heath
+ivy
+juniper
+kestrel
+larch
+moss
+nettle
+oak
+pine
+quince
+reed
+sage
+thistle
+umber
+vetch
+willow
+yarrow
