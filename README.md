@@ -12,7 +12,7 @@ always-on agent.
 
 | Role      | Scope | Lifecycle               | What it's for |
 |-----------|-------|-------------------------|---------------|
-| `mayor`   | city  | always-on, sleeps 30m   | Coordinator. Plans, dispatches, manages rigs. |
+| `mayor`   | city  | always-on               | Coordinator. Plans, dispatches, manages rigs. |
 | `crew`    | rig   | user-named, persistent  | Your hands-on workspace inside a rig. Like a vanilla Claude Code session, with bead/mail awareness. |
 | `polecat` | rig   | ephemeral, scale 0–5    | Slung-to worker. Spin up, do task, die after 2h idle. |
 
@@ -55,15 +55,60 @@ provider = "claude"
 # [[rigs]]
 # name = "my-project"
 # path = "/path/to/my-project"
-
-# Add a crew member by declaring an [[agent]] entry inline:
-# [[agent]]
-# name = "alice"
-# dir = "my-project"
-# prompt_template = "packs/gasvillage/assets/prompts/crew.template.md"
-# pre_start = ["packs/gasvillage/assets/scripts/worktree-setup.sh /path/to/my-project /path/to/city/.gc/worktrees/my-project/alice alice --sync"]
-# idle_timeout = "4h"
 ```
+
+## Adding a crew member
+
+Crew are **user-named**, so they aren't pack-stamped — you create one
+explicitly. Two steps: scaffold the agent directory, then activate a
+persistent session for it.
+
+**1. Scaffold the agent** (copies the crew prompt into place):
+
+```shell
+gc agent add --name alice --dir my-project \
+  --prompt-template packs/gasvillage/assets/prompts/crew.template.md
+```
+
+This writes `agents/alice/prompt.template.md` (a byte-for-byte copy of the crew
+template) and a thin `agents/alice/agent.toml`. Scaffolding alone does **not**
+start a session.
+
+**2. Flesh out `agents/alice/agent.toml`** with the crew defaults:
+
+```toml
+scope = "rig"
+dir = "my-project"
+wake_mode = "fresh"
+work_dir = ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
+idle_timeout = "4h"
+max_active_sessions = 1
+nudge = "Check your hook and mail, then act accordingly."
+pre_start = ["{{.CityRoot}}/packs/gasvillage/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
+```
+
+Don't declare `session_live` here — it's inherited from the pack's `[global]`
+(mouse + theme), and redeclaring it double-runs the hook.
+
+**3. Activate a persistent session** by adding a `[[named_session]]` to
+`city.toml`:
+
+```toml
+[[named_session]]
+template = "alice"
+scope = "rig"
+dir = "my-project"
+mode = "always"
+```
+
+Run `gc start` and the crew member comes up as a stable session
+`my-project/alice`.
+
+> **The load-bearing rule:** `dir = "my-project"` must appear in **both**
+> `agent.toml` and the `[[named_session]]`, and they must match. That `dir`
+> (not `scope`) is what binds the session to the rig as `my-project/alice`. A
+> `[[named_session]]` with `scope = "rig"` but no `dir` resolves to a bare,
+> unqualified `alice` and won't attach to your rig.
 
 ## Personalization
 
@@ -84,10 +129,21 @@ so it's picked up.
 
 - **One always-on session** (mayor) instead of Gas Town's three (mayor,
   deacon, boot) plus per-rig witness/refinery.
-- **Mayor sleeps** after 30m idle; wakes on user prompt or mail.
 - **Polecats** are pure on-demand (`min=0`).
 - **Crew** is user-driven, so token use tracks human activity — naturally
   bounded.
+
+### Note on mayor idle-sleep (v1 simplification)
+
+The framework enforces a hard XOR between `mode = "always"` and
+`sleep_after_idle`. Gas Village v1 ships the mayor as `mode = "always"`
+for newcomer-friendliness — the mayor is always reachable without
+needing to know `gc session attach mayor`. We accept the small idle
+cost of one always-on session.
+
+A future version can switch the mayor to `mode = "on_demand"` with
+`sleep_after_idle = "30m"` once we have a smoother resume UX (e.g.,
+auto-resume on `gc mail send mayor ...`).
 
 ## Graduating
 

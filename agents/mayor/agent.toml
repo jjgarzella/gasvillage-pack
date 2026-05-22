@@ -3,5 +3,10 @@ wake_mode = "fresh"
 work_dir = ".gc/agents/mayor"
 nudge = "Check mail and hook status, then act accordingly."
 idle_timeout = "1h"
-sleep_after_idle = "30m"
 max_active_sessions = 1
+
+# v1 note: mayor is mode="always" (set in pack.toml), which is incompatible
+# with sleep_after_idle. We'd need mode="on_demand" to enable idle sleep,
+# but that requires the user to `gc session attach mayor` to reach the
+# mayor after suspension — a stumble for newcomers. For v1 the mayor stays
+# always-on; revisit once we see real idle-token cost in practice.
