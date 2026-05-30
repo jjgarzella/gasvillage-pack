@@ -14,9 +14,9 @@
 # optimizes for approachability and a low token floor. For newcomers
 # who don't want to juggle 7 sessions at once.
 #
-# Referenced by both workspace.pack and rigs[].pack:
-#   workspace.pack → expands city-scoped agents only (mayor)
-#   rigs[].pack    → expands rig agents only (polecat)
+# Composed via PackV2 imports:
+#   root pack.toml [imports.gasvillage]      → expands city-scoped agents (mayor)
+#   city.toml      [rigs.imports.gasvillage] → expands rig agents (polecat)
 #
 # Crew members are NOT pack-stamped — each is user-named, so you create one
 # explicitly: `gc agent add` an agents/<name>/ dir, then activate it with a

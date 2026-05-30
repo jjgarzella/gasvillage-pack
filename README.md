@@ -47,14 +47,16 @@ source = "packs/gasvillage"
 In `city.toml`:
 
 ```toml
+# The city name lives in .gc/site.toml (workspace_name); city.toml
+# carries the default provider and rig registrations.
 [workspace]
-name = "my-city"
 provider = "claude"
 
-# Register rigs to activate per-rig agents (polecat):
+# Register rigs with `gc rig add <path> --name my-project` (the path is
+# recorded in .gc/site.toml). Each registered rig activates the per-rig
+# agents (polecat):
 # [[rigs]]
 # name = "my-project"
-# path = "/path/to/my-project"
 ```
 
 ## Adding a crew member

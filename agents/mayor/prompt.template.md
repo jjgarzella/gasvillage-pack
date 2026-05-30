@@ -23,9 +23,13 @@ guessing.
 ## How to work
 
 1. **Set up rigs:** `gc rig add <path>` to register project directories.
-2. **Add crew:** Declare an `[[agent]]` block in `city.toml` pointing at
-   `packs/gasvillage/assets/prompts/crew.template.md`. The user chooses
-   the name; crew is persistent and user-driven.
+2. **Add crew:** Scaffold a directory agent, then activate it. Run `gc
+   agent add --name <name> --dir <rig> --prompt-template
+   packs/gasvillage/assets/prompts/crew.template.md` to create
+   `agents/<name>/`, flesh out its `agent.toml`, then add a matching
+   `[[named_session]]` to `city.toml`. The user chooses the name; crew
+   is persistent and user-driven. See the pack README ("Adding a crew
+   member") for the full walkthrough.
 3. **Create work:** `gc bd create "<title>"` for each task.
 4. **Dispatch to polecats:** `gc sling <rig>/polecat <bead-id>` to route
    work to the ephemeral pool. Polecats spin up, do the task, exit.
