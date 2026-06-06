@@ -4,9 +4,10 @@
 #   mayor    — city-scoped, always-on coordinator. (Idle-sleep is on the
 #              roadmap; the framework forbids combining mode="always" with
 #              sleep_after_idle, so v1 keeps it simple.)
-#   crew     — rig-scoped, user-named, persistent. Replicates a vanilla
-#              Claude Code session with bead/mail awareness. Created via
-#              `gc agent add` + a [[named_session]] in city.toml.
+#   crew     — rig-scoped, user-named, on_demand (asleep until woken).
+#              Replicates a vanilla Claude Code session with bead/mail
+#              awareness. Created via `gc agent add` + a [[named_session]]
+#              in city.toml.
 #   polecat  — rig-scoped, ephemeral worker pool. Slung via `gc sling`,
 #              scales 0–5, idle_timeout 2h.
 #

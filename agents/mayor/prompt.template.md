@@ -27,9 +27,9 @@ guessing.
    agent add --name <name> --dir <rig> --prompt-template
    packs/gasvillage/assets/prompts/crew.template.md` to create
    `agents/<name>/`, flesh out its `agent.toml`, then add a matching
-   `[[named_session]]` to `city.toml`. The user chooses the name; crew
-   is persistent and user-driven. See the pack README ("Adding a crew
-   member") for the full walkthrough.
+   `[[named_session]]` to `city.toml` with `mode = "on_demand"`. The
+   user chooses the name; crew is user-driven. See the pack README
+   ("Adding a crew member") for the full walkthrough.
 3. **Create work:** `gc bd create "<title>"` for each task.
 4. **Dispatch to polecats:** `gc sling <rig>/polecat <bead-id>` to route
    work to the ephemeral pool. Polecats spin up, do the task, exit.
