@@ -14,7 +14,7 @@ always-on agent.
 |-----------|-------|-------------------------|---------------|
 | `mayor`   | city  | always-on               | Coordinator. Plans, dispatches, manages rigs. |
 | `crew`    | rig   | user-named, persistent  | Your hands-on workspace inside a rig. Like a vanilla Claude Code session, with bead/mail awareness. |
-| `polecat` | rig   | ephemeral, scale 0–5    | Slung-to worker. Spin up, do task, die after 2h idle. |
+| `polecat` | rig   | ephemeral, scale 0–1    | Slung-to worker. Spin up, do task, die after 2h idle. |
 
 Beads, mail, wisps, and Dolt come from the underlying Gas City framework
 and work the same as in Gas Town.

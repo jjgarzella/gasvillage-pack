@@ -9,7 +9,7 @@
 #              awareness. Created via `gc agent add` + a [[named_session]]
 #              in city.toml.
 #   polecat  — rig-scoped, ephemeral worker pool. Slung via `gc sling`,
-#              scales 0–5, idle_timeout 2h.
+#              scales 0–1, idle_timeout 2h.
 #
 # Where Gas Town optimizes for parallel-agent velocity, Gas Village
 # optimizes for approachability and a low token floor. For newcomers
