@@ -76,22 +76,110 @@ idempotent resume, and run {{setup_command}}.
 Exit criteria: in an isolated worktree on a clean feature branch off current
 upstream {{base_branch}}, recorded on the seed bead."""
 
-# --- confirm-reproduce: NEW (stub; real content in gcs-su3b.2) ---
+# --- confirm-reproduce: NEW (gcs-su3b.2) ---
 [[steps]]
 id = "confirm-reproduce"
 title = "Reproduce on current upstream main, classify, escalate gate"
 needs = ["workspace-setup"]
 description = """
-[STUB — fleshed out in gcs-su3b.2.]
+The integrity gate. Reproduce the suspected bug ON CURRENT UPSTREAM
+{{base_branch}} — independently, from scratch — then classify it and decide:
+proceed, or ESCALATE and stop. This runs BEFORE preflight-tests so a bug you
+cannot reproduce exits cheaply, before any pre-flighting or implementation.
 
-Reproduce the suspected bug ON CURRENT UPSTREAM {{base_branch}} (not the seed's
-stale copy). Independently regenerate the evidence; classify correctness vs perf;
-root-cause. ESCALATE (no push, reassign handoff) on: cannot reproduce on current
-main, finding-vs-hint mismatch, or upstream unreachable. Runs BEFORE pre-flights
-so a no-repro exits cheaply.
+Trust NOTHING in the seed bead except the bug report itself. The suspected root
+cause is a disposable CROSS-CHECK, never an anchor — you regenerate every piece
+of evidence yourself and let reality, not the seed, decide what is true.
 
-Exit criteria: bug reproduced + classified on current upstream main, or escalated
-with evidence-so-far recorded inline on the seed bead."""
+**1. Re-derive the seed bead and read the report:**
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+[ -z "$WORK_BEAD_ID" ] && { echo "confirm-reproduce: need exactly one tracked seed bead in convoy {{convoy_id}}" >&2; exit 1; }
+bd show "$WORK_BEAD_ID"
+```
+From the seed, read: the **upstream repo**, the **reproducer** (the failing call
+plus expected-vs-actual), the **category** (correctness|perf), and the OPTIONAL
+**suspected-root-cause hint**. The repo, reproducer, and category are required to
+proceed; a missing repo or reproducer is itself an escalation — you cannot verify
+a bug you cannot run.
+
+**2. VERIFY-ON-MAIN — fetch upstream and pin its CURRENT tip:**
+The cardinal rule (hard lesson mc-yt8k: prior runs reproduced against a stale
+vendored copy ~131/~494 commits behind and chased already-fixed bugs). Reproduce
+against upstream's CURRENT {{base_branch}}, NEVER the local/vendored snapshot.
+```bash
+# workspace-setup adds the seed's repo as remote 'upstream' and branches off its
+# fresh main. Re-fetch here to PIN the exact tip you test; add the remote from
+# the seed's repo URL first if it is missing.
+git remote get-url upstream >/dev/null 2>&1 || git remote add upstream <seed-repo-url>
+if ! git fetch --prune upstream {{base_branch}}; then
+  echo "confirm-reproduce: upstream {{base_branch}} UNREACHABLE -> ESCALATE (see step 5)" >&2
+fi
+UPSTREAM_SHA=$(git rev-parse --short FETCH_HEAD 2>/dev/null || echo UNKNOWN)
+echo "testing upstream {{base_branch}} @ $UPSTREAM_SHA"
+```
+If upstream is UNREACHABLE (fetch fails, repo gone, network down) -> **ESCALATE**
+(step 5, reason `unreachable`). Do NOT silently fall back to the stale copy.
+
+**3. Independently regenerate ALL evidence:**
+Locate the offending code path and observe the failure with your OWN tooling —
+do not paste the seed's traces. For a live interpreter (e.g. Julia via the julia
+MCP + Revise, loaded against the freshly-fetched main):
+- locate the method YOURSELF (`@which <call>` / dispatch trace, or the language's
+  equivalent) and record where it actually resolves on current main;
+- run the reproducer and capture the ACTUAL behavior — the error + stacktrace for
+  a correctness bug, a timed/allocated measurement for a perf bug;
+- cite YOUR fresh observation, the upstream SHA, and your own method location.
+The seed's suspected root cause is a CROSS-CHECK only: confirm or refute it
+against what you just observed — never copy it forward as established fact.
+
+**4. Classify, record, and check for contradiction:**
+- **correctness** -> the reproducer FAILS on current main (wrong result, error,
+  or unexpected output) in the way the seed claims.
+- **perf** -> the reproducer shows the claimed regression as a MEASUREMENT (N
+  runs on the current build), not an assertion.
+Record the classification + the tested SHA on the seed bead so `implement` picks
+the right evidence regime:
+```bash
+bd update "$WORK_BEAD_ID" --set-metadata gc.bug_category=<correctness|perf> --set-metadata gc.upstream_sha=$UPSTREAM_SHA --notes "$(cat <<NOTE
+confirm-reproduce: reproduced on upstream <repo> @ $UPSTREAM_SHA (current {{base_branch}}).
+Category: <correctness|perf>. Independent evidence:
+- method resolves at: <@which / location you found>
+- observed: <your fresh failure / measurement>
+- seed root-cause cross-check: <CONFIRMED | REFUTED — what you actually found>
+NOTE
+)"
+```
+
+**5. The ESCALATE gate — STOP and hand off (NO push) on ANY of:**
+- **unreachable** — could not fetch / reach current upstream {{base_branch}};
+- **no-repro-on-main** — the bug does NOT reproduce on current {{base_branch}}
+  (already fixed upstream, or never present there);
+- **seed-mismatch** — your independent finding CONTRADICTS the seed (different
+  root cause, different category, or the reproducer behaves correctly).
+
+File nothing, fix nothing, push nothing. Record evidence-so-far inline, reassign
+the seed back to a human, and drain. This mirrors the push-and-handoff
+"investigative dead-end" terminal, taken early.
+```bash
+HANDOFF="{{handoff_target}}"
+[ -z "$HANDOFF" ] && HANDOFF="${GC_RIG:+$GC_RIG/}crew"   # rig crew; use ${GC_RIG:+$GC_RIG/}mayor if the rig has no crew worker
+bd update "$WORK_BEAD_ID" --assignee="$HANDOFF" --set-metadata gc.outcome=escalate --notes "$(cat <<NOTE
+ESCALATE (confirm-reproduce): <unreachable | no-repro-on-main | seed-mismatch>.
+Tested upstream <repo> @ $UPSTREAM_SHA. Evidence so far: <what you observed vs. what the seed claimed>.
+No branch pushed; nothing filed. Human gate.
+NOTE
+)"
+gc runtime drain-ack
+exit 0
+```
+Leave the seed bead OPEN (the human is the gate) — do not close it.
+
+**Exit criteria:** the bug is reproduced AND classified on current upstream
+{{base_branch}} with independently-regenerated evidence recorded on the seed bead
+(`gc.bug_category` + `gc.upstream_sha` set) — OR a clean ESCALATE exit (evidence
+inline, seed reassigned to the handoff target, session drained, nothing pushed)."""
 
 # --- preflight-tests: REUSE base behavior, reordered after confirm-reproduce ---
 [[steps]]
