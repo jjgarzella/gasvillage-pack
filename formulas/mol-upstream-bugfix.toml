@@ -1,0 +1,199 @@
+description = """
+Upstream bug-report + fix polecat formula (gasvillage pack).
+
+Takes ONE seed bead (= one suspected upstream bug) through a full autonomous
+pipeline and stops at a reassigned HANDOFF bead. It prepares everything needed
+to file an upstream issue + PR but NEVER files — the public, human-attributed
+step is human-gated and happens downstream. The gate is STRUCTURAL (a polecat
+cannot file), not a flag.
+
+Extends mol-polecat-base. The 8-step needs-DAG inserts a confirm-reproduce gate
+BEFORE pre-flights (cheap early-exit on no-repro), overrides workspace-setup to
+branch off freshly-fetched upstream main, overrides implement for a TDD
+red-on-master / benchmark MWE, and adds draft-artifacts plus a non-filing
+push-and-handoff terminal.
+
+DAG: load-context -> workspace-setup -> confirm-reproduce -> preflight-tests ->
+implement -> self-review -> draft-artifacts -> push-and-handoff.
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| convoy_id | runtime | Input convoy tracking the single seed bead. |
+| base_branch | caller | Upstream base branch to branch from / measure against (default: main). |
+| setup_command | rig `formula_vars` | Setup/install command. Empty = skip. |
+| typecheck_command | rig `formula_vars` | Type check command. Empty = skip. |
+| test_command | rig `formula_vars` | Test command. Empty = skip. |
+| lint_command | rig `formula_vars` | Lint command. Empty = skip. |
+| build_command | rig `formula_vars` | Build command. Empty = skip. |
+| push_remote | caller | Remote to push the fix branch to. Empty = local-only branch (no push). |
+| handoff_target | caller | Agent to reassign the seed bead to for filing. Empty = resolve rig crew -> mayor at runtime. |
+
+## Seed bead (NOT vars — read at runtime, per the build epic gcs-su3b)
+
+The upstream repo, the reproducer with expected-vs-actual, the category
+(correctness|perf), and an OPTIONAL suspected-root-cause hint all live in the
+SEED bead, not in vars. Hard contract: independent regeneration of all evidence,
+VERIFY-ON-CURRENT-upstream-main (never the stale vendored copy), origin-free
+MWEs, and escalate-don't-guess on mismatch / no-repro / unreachable.
+
+NOTE: gasvillage pack, NOT gastown — there is NO Witness and NO refinery here.
+
+THIS IS A SKELETON (gcs-su3b.1): the step bodies below are STUBS. Real step
+content lands in gcs-su3b.2 (confirm-reproduce), .3 (implement), .4
+(draft-artifacts), and .5 (push-and-handoff + workspace-setup/self-review
+overrides)."""
+formula = "mol-upstream-bugfix"
+extends = ["mol-polecat-base"]
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+[vars.push_remote]
+description = "Remote to push the fix branch to. Empty => local-only branch (no push)."
+default = ""
+
+[vars.handoff_target]
+description = "Agent address to reassign the seed bead to for human filing. Empty => resolve rig crew -> mayor at runtime."
+default = ""
+
+# --- workspace-setup: OVERRIDE base (stub; real content in gcs-su3b.5) ---
+[[steps]]
+id = "workspace-setup"
+title = "Set up worktree + feature branch off freshly-fetched upstream main"
+needs = ["load-context"]
+description = """
+[STUB — fleshed out in gcs-su3b.5.]
+
+Override of mol-polecat-base workspace-setup. Will create an isolated worktree
+on a feature branch cut from FRESHLY-FETCHED upstream {{base_branch}}
+(VERIFY-ON-MAIN: never the stale vendored/local copy, which prior runs found
+~131/~494 commits behind), record branch + work_dir on the seed bead for
+idempotent resume, and run {{setup_command}}.
+
+Exit criteria: in an isolated worktree on a clean feature branch off current
+upstream {{base_branch}}, recorded on the seed bead."""
+
+# --- confirm-reproduce: NEW (stub; real content in gcs-su3b.2) ---
+[[steps]]
+id = "confirm-reproduce"
+title = "Reproduce on current upstream main, classify, escalate gate"
+needs = ["workspace-setup"]
+description = """
+[STUB — fleshed out in gcs-su3b.2.]
+
+Reproduce the suspected bug ON CURRENT UPSTREAM {{base_branch}} (not the seed's
+stale copy). Independently regenerate the evidence; classify correctness vs perf;
+root-cause. ESCALATE (no push, reassign handoff) on: cannot reproduce on current
+main, finding-vs-hint mismatch, or upstream unreachable. Runs BEFORE pre-flights
+so a no-repro exits cheaply.
+
+Exit criteria: bug reproduced + classified on current upstream main, or escalated
+with evidence-so-far recorded inline on the seed bead."""
+
+# --- preflight-tests: REUSE base behavior, reordered after confirm-reproduce ---
+[[steps]]
+id = "preflight-tests"
+title = "Verify pre-flights pass on upstream base branch"
+needs = ["confirm-reproduce"]
+description = """
+Confirm upstream {{base_branch}} is healthy BEFORE you mutate it, so a failure
+you see later is yours and not pre-existing. Reordered to run AFTER
+confirm-reproduce — there is no point pre-flighting a bug you could not reproduce.
+
+**Config: typecheck_command = {{typecheck_command}}**
+**Config: lint_command = {{lint_command}}**
+**Config: test_command = {{test_command}}**
+
+Run the configured pre-flights (empty commands skip silently):
+```bash
+{{typecheck_command}}
+{{lint_command}}
+{{test_command}}
+```
+
+If they pass, proceed to implement. If they FAIL on {{base_branch}}, the upstream
+base is broken — do NOT fix pre-existing failures and do NOT push to
+{{base_branch}}; file a bead and treat it as an escalation per the seed's
+contract.
+
+Exit criteria: pre-flights pass (or a pre-existing-failure bead is filed), ready
+to implement."""
+
+# --- implement: OVERRIDE base (stub; real content in gcs-su3b.3) ---
+[[steps]]
+id = "implement"
+title = "TDD fix: red-on-master MWE / benchmark -> fix -> regression"
+needs = ["preflight-tests"]
+description = """
+[STUB — fleshed out in gcs-su3b.3.]
+
+Override of mol-polecat-base implement. TDD via julia MCP + Revise (no git
+gymnastics — Revise handles additions cleanly): correctness -> a self-contained,
+origin-free MWE that goes RED on master then GREEN with the fix (the full file
+stays green); perf -> a fresh benchmark (N x, measured on the current build) that
+IS the MWE. Un-producible -> ESCALATE. Commit the fix + regression test; drafts
+are NOT committed (they stay inline on the seed bead to keep the PR diff clean).
+
+Exit criteria: fix + regression committed on the feature branch; the MWE is
+demonstrably red-on-master then green with the fix."""
+
+# --- self-review: ADAPT base (stub; real content in gcs-su3b.5) ---
+[[steps]]
+id = "self-review"
+title = "Self-review: diff clean + ORIGIN-FREE"
+needs = ["implement"]
+description = """
+[STUB — fleshed out in gcs-su3b.5.]
+
+Adapt of mol-polecat-base self-review. Review the diff and run quality checks
+({{typecheck_command}} / {{lint_command}} / {{build_command}} / {{test_command}});
+additionally assert the diff is ORIGIN-FREE — no provenance or discovery history,
+no "imported from <project>" references in code or comments.
+
+Exit criteria: all checks pass, the diff is clean and origin-free, working tree
+clean."""
+
+# --- draft-artifacts: NEW (stub; real content in gcs-su3b.4) ---
+[[steps]]
+id = "draft-artifacts"
+title = "Draft issue + PR from pack templates (origin-free), inline on bead"
+needs = ["self-review"]
+description = """
+[STUB — fleshed out in gcs-su3b.4.]
+
+Generate an issue draft and a PR draft from the gasvillage pack templates
+(templates/issue.md, templates/pr.md) with origin-free prose, plus an empty
+disclosure placeholder (templates/disclosure.md) flagged for the human. Drafts
+live INLINE on the seed bead ONLY — never committed to the branch (keeps the PR
+diff clean).
+
+Exit criteria: issue + PR drafts written inline on the seed bead; the disclosure
+placeholder is flagged for human review."""
+
+# --- push-and-handoff: NEW terminal (stub; real content in gcs-su3b.5) ---
+[[steps]]
+id = "push-and-handoff"
+title = "Push branch (or local), reassign seed bead, drain (non-filing terminal)"
+needs = ["draft-artifacts"]
+description = """
+[STUB — fleshed out in gcs-su3b.5.]
+
+Non-filing terminal. Push the feature branch to {{push_remote}} (empty => keep
+the branch local-only), then UPDATE + REASSIGN the existing seed bead to
+{{handoff_target}} (empty => resolve rig crew -> mayor) carrying the issue/PR
+drafts, the branch name + base, the verification evidence, and a READY-TO-FILE
+status line. Leave the bead OPEN (the human is the gate). NEVER opens an issue or
+PR — that public, human-attributed step happens downstream.
+
+Terminal outcomes:
+- Success -> push + status READY TO FILE + reassign to handoff_target + drain-ack.
+- Investigative dead-end -> status ESCALATE: <reason> + evidence inline; NO push;
+  reassign + drain-ack.
+- Functional block (env won't build, tests won't run) -> MAIL THE MAYOR; do NOT
+  drain — hold the session alive for the mayor to inspect/unblock.
+
+Exit criteria: branch pushed-or-local, seed bead updated + reassigned to the
+handoff target, session drained (success/escalate) or held (functional block)."""
