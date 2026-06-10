@@ -210,23 +210,95 @@ contract.
 Exit criteria: pre-flights pass (or a pre-existing-failure bead is filed), ready
 to implement."""
 
-# --- implement: OVERRIDE base (stub; real content in gcs-su3b.3) ---
+# --- implement: OVERRIDE base (gcs-su3b.3) ---
 [[steps]]
 id = "implement"
 title = "TDD fix: red-on-master MWE / benchmark -> fix -> regression"
 needs = ["preflight-tests"]
 description = """
-[STUB — fleshed out in gcs-su3b.3.]
+Override of mol-polecat-base `implement`: produce the MINIMAL fix together with
+the regime-appropriate MWE evidence, TDD-RED-FIRST. The red regression test
+(correctness) or the benchmark (perf) IS the deliverable evidence — it must be
+SELF-CONTAINED and ORIGIN-FREE (no "imported from <project>", no discovery or
+provenance history). Commit ONLY the fix + the MWE; issue/PR drafts are NOT
+committed here — draft-artifacts writes them inline on the seed bead so the PR
+diff stays clean.
 
-Override of mol-polecat-base implement. TDD via julia MCP + Revise (no git
-gymnastics — Revise handles additions cleanly): correctness -> a self-contained,
-origin-free MWE that goes RED on master then GREEN with the fix (the full file
-stays green); perf -> a fresh benchmark (N x, measured on the current build) that
-IS the MWE. Un-producible -> ESCALATE. Commit the fix + regression test; drafts
-are NOT committed (they stay inline on the seed bead to keep the PR diff clean).
+**Mechanism: julia MCP + Revise, no git gymnastics.** Achieve "red-on-master" by
+writing the test FIRST and running it against the as-yet-UNFIXED source — that IS
+the master behavior on your fresh branch. Never stash/checkout/revert source to
+fake a red; reverting source is what breaks Revise. Apply the fix, let Revise
+hot-reload, and re-run. For a non-Julia upstream, use the repo's native runner;
+the red-first ordering is identical. Auto-discover the test mechanism from the
+repo, or use {{test_command}} when it is set.
 
-Exit criteria: fix + regression committed on the feature branch; the MWE is
-demonstrably red-on-master then green with the fix."""
+**1. Re-derive the seed bead and the regime confirm-reproduce recorded:**
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+REGIME=$(bd show "$WORK_BEAD_ID" --json | jq -r 'if type=="array" then .[0] else . end | .metadata["gc.bug_category"] // empty')
+UPSTREAM_SHA=$(bd show "$WORK_BEAD_ID" --json | jq -r 'if type=="array" then .[0] else . end | .metadata["gc.upstream_sha"] // empty')
+echo "regime=$REGIME upstream_sha=$UPSTREAM_SHA"
+```
+`gc.bug_category` is set by confirm-reproduce. If it is EMPTY, the bug was never
+verified — STOP and re-run confirm-reproduce; do not implement against an
+unconfirmed bug.
+
+**2a. correctness regime — red-on-master -> fix -> regression:**
+- Write the MWE as a self-contained, origin-free regression test beside the repo's
+  existing tests for that area.
+- Run it on the UNFIXED source (current master on your branch). It MUST go RED and
+  reproduce the reported wrong behavior. If it will NOT go red, your target is
+  wrong or the bug is not as reported -> **ESCALATE** (step 3).
+- Apply the MINIMAL fix; let Revise hot-reload.
+- Re-run the MWE: it MUST pass.
+- Run the FULL relevant test file ({{test_command}} if set): it MUST stay green —
+  no regressions.
+
+**2b. perf regime — the benchmark IS the MWE:**
+- Write a fresh, self-contained benchmark: old path vs new path, N runs, measured
+  on the CURRENT build. Record the numbers, N, and the machine in your evidence.
+- Add a correctness guard that passes on BOTH master and the fixed build — the perf
+  fix must not change results.
+- Apply the fix; show the benchmark improves by the claimed margin. If you cannot
+  produce a credible benchmark (no stable measurement, regression not reproducible)
+  -> **ESCALATE** (step 3).
+
+**3. Un-producible evidence -> ESCALATE (no push, no speculative fix):**
+Same gate as confirm-reproduce. Never commit a fix you cannot back with red-first
+or benchmark evidence.
+```bash
+HANDOFF="{{handoff_target}}"
+[ -z "$HANDOFF" ] && HANDOFF="${GC_RIG:+$GC_RIG/}crew"   # rig crew; use ${GC_RIG:+$GC_RIG/}mayor if the rig has no crew worker
+bd update "$WORK_BEAD_ID" --assignee="$HANDOFF" --set-metadata gc.outcome=escalate --notes "$(cat <<NOTE
+ESCALATE (implement): <correctness test will not go red | no credible benchmark>.
+Regime: $REGIME. Tested upstream @ $UPSTREAM_SHA. Evidence so far: <what you tried + what happened>.
+No fix committed; nothing pushed. Human gate.
+NOTE
+)"
+gc runtime drain-ack
+exit 0
+```
+
+**4. Commit the fix + MWE (strong message — body explains the bug AND the evidence):**
+```bash
+git add <fixed-source> <the-MWE-test-or-benchmark>
+git commit -m "fix: <imperative subject for the bug fix>" -m "$(cat <<'BODY'
+<What the bug was and why this is the minimal fix. Cite YOUR fresh evidence:
+correctness -> the MWE that goes red on the upstream SHA you tested then green
+with the fix, plus the full file staying green; perf -> the benchmark numbers
+(old vs new, N runs, current build) and the correctness guard. Describe the bug
+as found fresh — ORIGIN-FREE, no provenance/discovery history.>
+BODY
+)"
+```
+Do NOT commit issue/PR drafts — draft-artifacts owns those, inline on the bead.
+
+**Exit criteria:** the minimal fix is committed with its regime-appropriate MWE
+(red-on-master-then-green regression for correctness, or a fresh benchmark plus
+correctness guard for perf); the full relevant test file is green; the diff is
+self-contained and origin-free — OR a clean ESCALATE exit (no fix, nothing
+pushed)."""
 
 # --- self-review: ADAPT base (stub; real content in gcs-su3b.5) ---
 [[steps]]
