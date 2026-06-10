@@ -316,22 +316,78 @@ no "imported from <project>" references in code or comments.
 Exit criteria: all checks pass, the diff is clean and origin-free, working tree
 clean."""
 
-# --- draft-artifacts: NEW (stub; real content in gcs-su3b.4) ---
+# --- draft-artifacts: NEW (gcs-su3b.4) ---
 [[steps]]
 id = "draft-artifacts"
 title = "Draft issue + PR from pack templates (origin-free), inline on bead"
 needs = ["self-review"]
 description = """
-[STUB — fleshed out in gcs-su3b.4.]
+Generate the issue + PR drafts from the gasvillage pack templates and store them
+INLINE on the seed bead — NEVER committed to the branch (keeps the PR diff clean,
+and the worktree is ephemeral so the bead is the durable handoff payload). All
+prose is ORIGIN-FREE: describe the bug as if discovered fresh on current upstream
+{{base_branch}}, with NO provenance, discovery history, or "found while working on
+<project>" references.
 
-Generate an issue draft and a PR draft from the gasvillage pack templates
-(templates/issue.md, templates/pr.md) with origin-free prose, plus an empty
-disclosure placeholder (templates/disclosure.md) flagged for the human. Drafts
-live INLINE on the seed bead ONLY — never committed to the branch (keeps the PR
-diff clean).
+The templates are pack files read at the branch-independent city path:
+- $GC_CITY/packs/gasvillage/templates/issue.md
+- $GC_CITY/packs/gasvillage/templates/pr.md
+- $GC_CITY/packs/gasvillage/templates/disclosure.md
 
-Exit criteria: issue + PR drafts written inline on the seed bead; the disclosure
-placeholder is flagged for human review."""
+**1. Re-derive the seed bead and gather YOUR OWN fresh evidence:**
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+bd show "$WORK_BEAD_ID"   # the confirm-reproduce + implement evidence recorded inline
+REGIME=$(bd show "$WORK_BEAD_ID" --json | jq -r 'if type=="array" then .[0] else . end | .metadata["gc.bug_category"] // empty')
+UPSTREAM_SHA=$(bd show "$WORK_BEAD_ID" --json | jq -r 'if type=="array" then .[0] else . end | .metadata["gc.upstream_sha"] // empty')
+BRANCH=$(git branch --show-current)
+```
+Pull the bug summary, reproducer, expected-vs-actual, root cause, the MWE/benchmark,
+and the branch + base from YOUR confirm-reproduce and implement runs (recorded on
+the bead) — never from the seed's original prose.
+
+**2. Fill the ISSUE draft** from `issue.md`:
+- Set the template's title heading to a crisp one-line bug summary (it becomes the
+  issue title).
+- Summary / Reproduction (the self-contained MWE) / Expected / Actual (your observed
+  output) / Root cause (file:line + mechanism) / Proposed fix. Origin-free throughout.
+
+**3. Fill the PR draft** from `pr.md`:
+- Set the title heading to the fix's imperative subject.
+- KEEP the literal `Closes #<issue>` placeholder — the issue number does not exist
+  until a human files it downstream.
+- What this changes / Reproduction-regression (the red-on-master MWE for correctness,
+  or the benchmark for perf — measured on {{base_branch}} @ $UPSTREAM_SHA, regime
+  $REGIME) / Validation (full file/suite stays green).
+
+**4. Disclosure — insert and FLAG, never fill:**
+Include `disclosure.md` VERBATIM (it is intentionally empty) and flag it for the
+human. A polecat NEVER writes disclosure content — responsible-disclosure is a
+human-attributed judgment call made downstream at filing time.
+
+**5. Store the drafts INLINE on the seed bead** (the .4->.5 handoff contract: the
+drafts live in the bead's `design` field; push-and-handoff reassigns the bead
+carrying them):
+```bash
+bd update "$WORK_BEAD_ID" --design "$(cat <<'DRAFTS'
+=== ISSUE DRAFT (ready to file; origin-free) ===
+<filled issue.md>
+
+=== PR DRAFT (branch <BRANCH> -> <base>; Closes #<issue> placeholder intact) ===
+<filled pr.md>
+
+=== DISCLOSURE (v1 placeholder — FLAGGED FOR HUMAN; do not file without completing) ===
+<verbatim disclosure.md>
+DRAFTS
+)"
+```
+Do NOT commit the drafts to the branch.
+
+**Exit criteria:** complete issue + PR drafts (origin-free; PR carries
+`Closes #<issue>`) stored inline in the seed bead's `design` field, with the
+disclosure placeholder present and flagged for the human. Nothing committed to the
+branch."""
 
 # --- push-and-handoff: NEW terminal (stub; real content in gcs-su3b.5) ---
 [[steps]]
