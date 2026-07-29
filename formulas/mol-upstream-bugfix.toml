@@ -30,7 +30,7 @@ implement -> self-review -> draft-artifacts -> push-and-handoff.
 | push_remote | caller | Remote to push the fix branch to. Empty = local-only branch (no push). |
 | handoff_target | caller | Agent to reassign the seed bead to for filing. Empty = resolve rig crew -> mayor at runtime. |
 
-## Seed bead (NOT vars — read at runtime, per the build epic gcs-su3b)
+## Seed bead (NOT vars — read at runtime)
 
 The upstream repo, the reproducer with expected-vs-actual, the category
 (correctness|perf), and an OPTIONAL suspected-root-cause hint all live in the
@@ -40,10 +40,9 @@ MWEs, and escalate-don't-guess on mismatch / no-repro / unreachable.
 
 NOTE: gasvillage pack, NOT gastown — there is NO Witness and NO refinery here.
 
-THIS IS A SKELETON (gcs-su3b.1): the step bodies below are STUBS. Real step
-content lands in gcs-su3b.2 (confirm-reproduce), .3 (implement), .4
-(draft-artifacts), and .5 (push-and-handoff + workspace-setup/self-review
-overrides)."""
+STATUS: not yet complete. The steps marked [STUB] below — workspace-setup,
+self-review, and push-and-handoff — describe intent, not runnable instructions;
+flesh them out before relying on this formula end-to-end."""
 formula = "mol-upstream-bugfix"
 extends = ["mol-polecat-base"]
 
@@ -59,24 +58,24 @@ default = ""
 description = "Agent address to reassign the seed bead to for human filing. Empty => resolve rig crew -> mayor at runtime."
 default = ""
 
-# --- workspace-setup: OVERRIDE base (stub; real content in gcs-su3b.5) ---
+# --- workspace-setup: OVERRIDE base (stub) ---
 [[steps]]
 id = "workspace-setup"
 title = "Set up worktree + feature branch off freshly-fetched upstream main"
 needs = ["load-context"]
 description = """
-[STUB — fleshed out in gcs-su3b.5.]
+[STUB — not yet fleshed out.]
 
 Override of mol-polecat-base workspace-setup. Will create an isolated worktree
 on a feature branch cut from FRESHLY-FETCHED upstream {{base_branch}}
-(VERIFY-ON-MAIN: never the stale vendored/local copy, which prior runs found
-~131/~494 commits behind), record branch + work_dir on the seed bead for
-idempotent resume, and run {{setup_command}}.
+(VERIFY-ON-MAIN: never a vendored/local copy, which can be arbitrarily far
+behind upstream), record branch + work_dir on the seed bead for idempotent
+resume, and run {{setup_command}}.
 
 Exit criteria: in an isolated worktree on a clean feature branch off current
 upstream {{base_branch}}, recorded on the seed bead."""
 
-# --- confirm-reproduce: NEW (gcs-su3b.2) ---
+# --- confirm-reproduce: NEW ---
 [[steps]]
 id = "confirm-reproduce"
 title = "Reproduce on current upstream main, classify, escalate gate"
@@ -105,9 +104,10 @@ proceed; a missing repo or reproducer is itself an escalation — you cannot ver
 a bug you cannot run.
 
 **2. VERIFY-ON-MAIN — fetch upstream and pin its CURRENT tip:**
-The cardinal rule (hard lesson mc-yt8k: prior runs reproduced against a stale
-vendored copy ~131/~494 commits behind and chased already-fixed bugs). Reproduce
-against upstream's CURRENT {{base_branch}}, NEVER the local/vendored snapshot.
+The cardinal rule. A vendored/local copy can be arbitrarily far behind upstream,
+and reproducing against one burns the whole run chasing already-fixed bugs.
+Reproduce against upstream's CURRENT {{base_branch}}, NEVER the local/vendored
+snapshot.
 ```bash
 # workspace-setup adds the seed's repo as remote 'upstream' and branches off its
 # fresh main. Re-fetch here to PIN the exact tip you test; add the remote from
@@ -210,7 +210,7 @@ contract.
 Exit criteria: pre-flights pass (or a pre-existing-failure bead is filed), ready
 to implement."""
 
-# --- implement: OVERRIDE base (gcs-su3b.3) ---
+# --- implement: OVERRIDE base ---
 [[steps]]
 id = "implement"
 title = "TDD fix: red-on-master MWE / benchmark -> fix -> regression"
@@ -300,13 +300,13 @@ correctness guard for perf); the full relevant test file is green; the diff is
 self-contained and origin-free — OR a clean ESCALATE exit (no fix, nothing
 pushed)."""
 
-# --- self-review: ADAPT base (stub; real content in gcs-su3b.5) ---
+# --- self-review: ADAPT base (stub) ---
 [[steps]]
 id = "self-review"
 title = "Self-review: diff clean + ORIGIN-FREE"
 needs = ["implement"]
 description = """
-[STUB — fleshed out in gcs-su3b.5.]
+[STUB — not yet fleshed out.]
 
 Adapt of mol-polecat-base self-review. Review the diff and run quality checks
 ({{typecheck_command}} / {{lint_command}} / {{build_command}} / {{test_command}});
@@ -316,7 +316,7 @@ no "imported from <project>" references in code or comments.
 Exit criteria: all checks pass, the diff is clean and origin-free, working tree
 clean."""
 
-# --- draft-artifacts: NEW (gcs-su3b.4) ---
+# --- draft-artifacts: NEW ---
 [[steps]]
 id = "draft-artifacts"
 title = "Draft issue + PR from pack templates (origin-free), inline on bead"
@@ -389,13 +389,13 @@ Do NOT commit the drafts to the branch.
 disclosure placeholder present and flagged for the human. Nothing committed to the
 branch."""
 
-# --- push-and-handoff: NEW terminal (stub; real content in gcs-su3b.5) ---
+# --- push-and-handoff: NEW terminal (stub) ---
 [[steps]]
 id = "push-and-handoff"
 title = "Push branch (or local), reassign seed bead, drain (non-filing terminal)"
 needs = ["draft-artifacts"]
 description = """
-[STUB — fleshed out in gcs-su3b.5.]
+[STUB — not yet fleshed out.]
 
 Non-filing terminal. Push the feature branch to {{push_remote}} (empty => keep
 the branch local-only), then UPDATE + REASSIGN the existing seed bead to
