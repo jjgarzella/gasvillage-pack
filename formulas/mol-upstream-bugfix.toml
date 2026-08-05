@@ -1,0 +1,415 @@
+description = """
+Upstream bug-report + fix polecat formula (gasvillage pack).
+
+Takes ONE seed bead (= one suspected upstream bug) through a full autonomous
+pipeline and stops at a reassigned HANDOFF bead. It prepares everything needed
+to file an upstream issue + PR but NEVER files — the public, human-attributed
+step is human-gated and happens downstream. The gate is STRUCTURAL (a polecat
+cannot file), not a flag.
+
+Extends mol-polecat-base. The 8-step needs-DAG inserts a confirm-reproduce gate
+BEFORE pre-flights (cheap early-exit on no-repro), overrides workspace-setup to
+branch off freshly-fetched upstream main, overrides implement for a TDD
+red-on-master / benchmark MWE, and adds draft-artifacts plus a non-filing
+push-and-handoff terminal.
+
+DAG: load-context -> workspace-setup -> confirm-reproduce -> preflight-tests ->
+implement -> self-review -> draft-artifacts -> push-and-handoff.
+
+## Variables
+
+| Variable | Source | Description |
+|----------|--------|-------------|
+| convoy_id | runtime | Input convoy tracking the single seed bead. |
+| base_branch | caller | Upstream base branch to branch from / measure against (default: main). |
+| setup_command | rig `formula_vars` | Setup/install command. Empty = skip. |
+| typecheck_command | rig `formula_vars` | Type check command. Empty = skip. |
+| test_command | rig `formula_vars` | Test command. Empty = skip. |
+| lint_command | rig `formula_vars` | Lint command. Empty = skip. |
+| build_command | rig `formula_vars` | Build command. Empty = skip. |
+| push_remote | caller | Remote to push the fix branch to. Empty = local-only branch (no push). |
+| handoff_target | caller | Agent to reassign the seed bead to for filing. Empty = resolve rig crew -> mayor at runtime. |
+
+## Seed bead (NOT vars — read at runtime)
+
+The upstream repo, the reproducer with expected-vs-actual, the category
+(correctness|perf), and an OPTIONAL suspected-root-cause hint all live in the
+SEED bead, not in vars. Hard contract: independent regeneration of all evidence,
+VERIFY-ON-CURRENT-upstream-main (never the stale vendored copy), origin-free
+MWEs, and escalate-don't-guess on mismatch / no-repro / unreachable.
+
+NOTE: gasvillage pack, NOT gastown — there is NO Witness and NO refinery here.
+
+STATUS: not yet complete. The steps marked [STUB] below — workspace-setup,
+self-review, and push-and-handoff — describe intent, not runnable instructions;
+flesh them out before relying on this formula end-to-end."""
+formula = "mol-upstream-bugfix"
+extends = ["mol-polecat-base"]
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[vars]
+[vars.push_remote]
+description = "Remote to push the fix branch to. Empty => local-only branch (no push)."
+default = ""
+
+[vars.handoff_target]
+description = "Agent address to reassign the seed bead to for human filing. Empty => resolve rig crew -> mayor at runtime."
+default = ""
+
+# --- workspace-setup: OVERRIDE base (stub) ---
+[[steps]]
+id = "workspace-setup"
+title = "Set up worktree + feature branch off freshly-fetched upstream main"
+needs = ["load-context"]
+description = """
+[STUB — not yet fleshed out.]
+
+Override of mol-polecat-base workspace-setup. Will create an isolated worktree
+on a feature branch cut from FRESHLY-FETCHED upstream {{base_branch}}
+(VERIFY-ON-MAIN: never a vendored/local copy, which can be arbitrarily far
+behind upstream), record branch + work_dir on the seed bead for idempotent
+resume, and run {{setup_command}}.
+
+Exit criteria: in an isolated worktree on a clean feature branch off current
+upstream {{base_branch}}, recorded on the seed bead."""
+
+# --- confirm-reproduce: NEW ---
+[[steps]]
+id = "confirm-reproduce"
+title = "Reproduce on current upstream main, classify, escalate gate"
+needs = ["workspace-setup"]
+description = """
+The integrity gate. Reproduce the suspected bug ON CURRENT UPSTREAM
+{{base_branch}} — independently, from scratch — then classify it and decide:
+proceed, or ESCALATE and stop. This runs BEFORE preflight-tests so a bug you
+cannot reproduce exits cheaply, before any pre-flighting or implementation.
+
+Trust NOTHING in the seed bead except the bug report itself. The suspected root
+cause is a disposable CROSS-CHECK, never an anchor — you regenerate every piece
+of evidence yourself and let reality, not the seed, decide what is true.
+
+**1. Re-derive the seed bead and read the report:**
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+[ -z "$WORK_BEAD_ID" ] && { echo "confirm-reproduce: need exactly one tracked seed bead in convoy {{convoy_id}}" >&2; exit 1; }
+bd show "$WORK_BEAD_ID"
+```
+From the seed, read: the **upstream repo**, the **reproducer** (the failing call
+plus expected-vs-actual), the **category** (correctness|perf), and the OPTIONAL
+**suspected-root-cause hint**. The repo, reproducer, and category are required to
+proceed; a missing repo or reproducer is itself an escalation — you cannot verify
+a bug you cannot run.
+
+**2. VERIFY-ON-MAIN — fetch upstream and pin its CURRENT tip:**
+The cardinal rule. A vendored/local copy can be arbitrarily far behind upstream,
+and reproducing against one burns the whole run chasing already-fixed bugs.
+Reproduce against upstream's CURRENT {{base_branch}}, NEVER the local/vendored
+snapshot.
+```bash
+# workspace-setup adds the seed's repo as remote 'upstream' and branches off its
+# fresh main. Re-fetch here to PIN the exact tip you test; add the remote from
+# the seed's repo URL first if it is missing.
+git remote get-url upstream >/dev/null 2>&1 || git remote add upstream <seed-repo-url>
+if ! git fetch --prune upstream {{base_branch}}; then
+  echo "confirm-reproduce: upstream {{base_branch}} UNREACHABLE -> ESCALATE (see step 5)" >&2
+fi
+UPSTREAM_SHA=$(git rev-parse --short FETCH_HEAD 2>/dev/null || echo UNKNOWN)
+echo "testing upstream {{base_branch}} @ $UPSTREAM_SHA"
+```
+If upstream is UNREACHABLE (fetch fails, repo gone, network down) -> **ESCALATE**
+(step 5, reason `unreachable`). Do NOT silently fall back to the stale copy.
+
+**3. Independently regenerate ALL evidence:**
+Locate the offending code path and observe the failure with your OWN tooling —
+do not paste the seed's traces. For a live interpreter (e.g. Julia via the julia
+MCP + Revise, loaded against the freshly-fetched main):
+- locate the method YOURSELF (`@which <call>` / dispatch trace, or the language's
+  equivalent) and record where it actually resolves on current main;
+- run the reproducer and capture the ACTUAL behavior — the error + stacktrace for
+  a correctness bug, a timed/allocated measurement for a perf bug;
+- cite YOUR fresh observation, the upstream SHA, and your own method location.
+The seed's suspected root cause is a CROSS-CHECK only: confirm or refute it
+against what you just observed — never copy it forward as established fact.
+
+**4. Classify, record, and check for contradiction:**
+- **correctness** -> the reproducer FAILS on current main (wrong result, error,
+  or unexpected output) in the way the seed claims.
+- **perf** -> the reproducer shows the claimed regression as a MEASUREMENT (N
+  runs on the current build), not an assertion.
+Record the classification + the tested SHA on the seed bead so `implement` picks
+the right evidence regime:
+```bash
+bd update "$WORK_BEAD_ID" --set-metadata gc.bug_category=<correctness|perf> --set-metadata gc.upstream_sha=$UPSTREAM_SHA --notes "$(cat <<NOTE
+confirm-reproduce: reproduced on upstream <repo> @ $UPSTREAM_SHA (current {{base_branch}}).
+Category: <correctness|perf>. Independent evidence:
+- method resolves at: <@which / location you found>
+- observed: <your fresh failure / measurement>
+- seed root-cause cross-check: <CONFIRMED | REFUTED — what you actually found>
+NOTE
+)"
+```
+
+**5. The ESCALATE gate — STOP and hand off (NO push) on ANY of:**
+- **unreachable** — could not fetch / reach current upstream {{base_branch}};
+- **no-repro-on-main** — the bug does NOT reproduce on current {{base_branch}}
+  (already fixed upstream, or never present there);
+- **seed-mismatch** — your independent finding CONTRADICTS the seed (different
+  root cause, different category, or the reproducer behaves correctly).
+
+File nothing, fix nothing, push nothing. Record evidence-so-far inline, reassign
+the seed back to a human, and drain. This mirrors the push-and-handoff
+"investigative dead-end" terminal, taken early.
+```bash
+HANDOFF="{{handoff_target}}"
+[ -z "$HANDOFF" ] && HANDOFF="${GC_RIG:+$GC_RIG/}crew"   # rig crew; use ${GC_RIG:+$GC_RIG/}mayor if the rig has no crew worker
+bd update "$WORK_BEAD_ID" --assignee="$HANDOFF" --set-metadata gc.outcome=escalate --notes "$(cat <<NOTE
+ESCALATE (confirm-reproduce): <unreachable | no-repro-on-main | seed-mismatch>.
+Tested upstream <repo> @ $UPSTREAM_SHA. Evidence so far: <what you observed vs. what the seed claimed>.
+No branch pushed; nothing filed. Human gate.
+NOTE
+)"
+gc runtime drain-ack
+exit 0
+```
+Leave the seed bead OPEN (the human is the gate) — do not close it.
+
+**Exit criteria:** the bug is reproduced AND classified on current upstream
+{{base_branch}} with independently-regenerated evidence recorded on the seed bead
+(`gc.bug_category` + `gc.upstream_sha` set) — OR a clean ESCALATE exit (evidence
+inline, seed reassigned to the handoff target, session drained, nothing pushed)."""
+
+# --- preflight-tests: REUSE base behavior, reordered after confirm-reproduce ---
+[[steps]]
+id = "preflight-tests"
+title = "Verify pre-flights pass on upstream base branch"
+needs = ["confirm-reproduce"]
+description = """
+Confirm upstream {{base_branch}} is healthy BEFORE you mutate it, so a failure
+you see later is yours and not pre-existing. Reordered to run AFTER
+confirm-reproduce — there is no point pre-flighting a bug you could not reproduce.
+
+**Config: typecheck_command = {{typecheck_command}}**
+**Config: lint_command = {{lint_command}}**
+**Config: test_command = {{test_command}}**
+
+Run the configured pre-flights (empty commands skip silently):
+```bash
+{{typecheck_command}}
+{{lint_command}}
+{{test_command}}
+```
+
+If they pass, proceed to implement. If they FAIL on {{base_branch}}, the upstream
+base is broken — do NOT fix pre-existing failures and do NOT push to
+{{base_branch}}; file a bead and treat it as an escalation per the seed's
+contract.
+
+Exit criteria: pre-flights pass (or a pre-existing-failure bead is filed), ready
+to implement."""
+
+# --- implement: OVERRIDE base ---
+[[steps]]
+id = "implement"
+title = "TDD fix: red-on-master MWE / benchmark -> fix -> regression"
+needs = ["preflight-tests"]
+description = """
+Override of mol-polecat-base `implement`: produce the MINIMAL fix together with
+the regime-appropriate MWE evidence, TDD-RED-FIRST. The red regression test
+(correctness) or the benchmark (perf) IS the deliverable evidence — it must be
+SELF-CONTAINED and ORIGIN-FREE (no "imported from <project>", no discovery or
+provenance history). Commit ONLY the fix + the MWE; issue/PR drafts are NOT
+committed here — draft-artifacts writes them inline on the seed bead so the PR
+diff stays clean.
+
+**Mechanism: julia MCP + Revise, no git gymnastics.** Achieve "red-on-master" by
+writing the test FIRST and running it against the as-yet-UNFIXED source — that IS
+the master behavior on your fresh branch. Never stash/checkout/revert source to
+fake a red; reverting source is what breaks Revise. Apply the fix, let Revise
+hot-reload, and re-run. For a non-Julia upstream, use the repo's native runner;
+the red-first ordering is identical. Auto-discover the test mechanism from the
+repo, or use {{test_command}} when it is set.
+
+**1. Re-derive the seed bead and the regime confirm-reproduce recorded:**
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+REGIME=$(bd show "$WORK_BEAD_ID" --json | jq -r 'if type=="array" then .[0] else . end | .metadata["gc.bug_category"] // empty')
+UPSTREAM_SHA=$(bd show "$WORK_BEAD_ID" --json | jq -r 'if type=="array" then .[0] else . end | .metadata["gc.upstream_sha"] // empty')
+echo "regime=$REGIME upstream_sha=$UPSTREAM_SHA"
+```
+`gc.bug_category` is set by confirm-reproduce. If it is EMPTY, the bug was never
+verified — STOP and re-run confirm-reproduce; do not implement against an
+unconfirmed bug.
+
+**2a. correctness regime — red-on-master -> fix -> regression:**
+- Write the MWE as a self-contained, origin-free regression test beside the repo's
+  existing tests for that area.
+- Run it on the UNFIXED source (current master on your branch). It MUST go RED and
+  reproduce the reported wrong behavior. If it will NOT go red, your target is
+  wrong or the bug is not as reported -> **ESCALATE** (step 3).
+- Apply the MINIMAL fix; let Revise hot-reload.
+- Re-run the MWE: it MUST pass.
+- Run the FULL relevant test file ({{test_command}} if set): it MUST stay green —
+  no regressions.
+
+**2b. perf regime — the benchmark IS the MWE:**
+- Write a fresh, self-contained benchmark: old path vs new path, N runs, measured
+  on the CURRENT build. Record the numbers, N, and the machine in your evidence.
+- Add a correctness guard that passes on BOTH master and the fixed build — the perf
+  fix must not change results.
+- Apply the fix; show the benchmark improves by the claimed margin. If you cannot
+  produce a credible benchmark (no stable measurement, regression not reproducible)
+  -> **ESCALATE** (step 3).
+
+**3. Un-producible evidence -> ESCALATE (no push, no speculative fix):**
+Same gate as confirm-reproduce. Never commit a fix you cannot back with red-first
+or benchmark evidence.
+```bash
+HANDOFF="{{handoff_target}}"
+[ -z "$HANDOFF" ] && HANDOFF="${GC_RIG:+$GC_RIG/}crew"   # rig crew; use ${GC_RIG:+$GC_RIG/}mayor if the rig has no crew worker
+bd update "$WORK_BEAD_ID" --assignee="$HANDOFF" --set-metadata gc.outcome=escalate --notes "$(cat <<NOTE
+ESCALATE (implement): <correctness test will not go red | no credible benchmark>.
+Regime: $REGIME. Tested upstream @ $UPSTREAM_SHA. Evidence so far: <what you tried + what happened>.
+No fix committed; nothing pushed. Human gate.
+NOTE
+)"
+gc runtime drain-ack
+exit 0
+```
+
+**4. Commit the fix + MWE (strong message — body explains the bug AND the evidence):**
+```bash
+git add <fixed-source> <the-MWE-test-or-benchmark>
+git commit -m "fix: <imperative subject for the bug fix>" -m "$(cat <<'BODY'
+<What the bug was and why this is the minimal fix. Cite YOUR fresh evidence:
+correctness -> the MWE that goes red on the upstream SHA you tested then green
+with the fix, plus the full file staying green; perf -> the benchmark numbers
+(old vs new, N runs, current build) and the correctness guard. Describe the bug
+as found fresh — ORIGIN-FREE, no provenance/discovery history.>
+BODY
+)"
+```
+Do NOT commit issue/PR drafts — draft-artifacts owns those, inline on the bead.
+
+**Exit criteria:** the minimal fix is committed with its regime-appropriate MWE
+(red-on-master-then-green regression for correctness, or a fresh benchmark plus
+correctness guard for perf); the full relevant test file is green; the diff is
+self-contained and origin-free — OR a clean ESCALATE exit (no fix, nothing
+pushed)."""
+
+# --- self-review: ADAPT base (stub) ---
+[[steps]]
+id = "self-review"
+title = "Self-review: diff clean + ORIGIN-FREE"
+needs = ["implement"]
+description = """
+[STUB — not yet fleshed out.]
+
+Adapt of mol-polecat-base self-review. Review the diff and run quality checks
+({{typecheck_command}} / {{lint_command}} / {{build_command}} / {{test_command}});
+additionally assert the diff is ORIGIN-FREE — no provenance or discovery history,
+no "imported from <project>" references in code or comments.
+
+Exit criteria: all checks pass, the diff is clean and origin-free, working tree
+clean."""
+
+# --- draft-artifacts: NEW ---
+[[steps]]
+id = "draft-artifacts"
+title = "Draft issue + PR from pack templates (origin-free), inline on bead"
+needs = ["self-review"]
+description = """
+Generate the issue + PR drafts from the gasvillage pack templates and store them
+INLINE on the seed bead — NEVER committed to the branch (keeps the PR diff clean,
+and the worktree is ephemeral so the bead is the durable handoff payload). All
+prose is ORIGIN-FREE: describe the bug as if discovered fresh on current upstream
+{{base_branch}}, with NO provenance, discovery history, or "found while working on
+<project>" references.
+
+The templates are pack files read at the branch-independent city path:
+- $GC_CITY/packs/gasvillage/templates/issue.md
+- $GC_CITY/packs/gasvillage/templates/pr.md
+- $GC_CITY/packs/gasvillage/templates/disclosure.md
+
+**1. Re-derive the seed bead and gather YOUR OWN fresh evidence:**
+```bash
+CONVOY_STATUS=$(gc convoy status {{convoy_id}} --json)
+WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
+bd show "$WORK_BEAD_ID"   # the confirm-reproduce + implement evidence recorded inline
+REGIME=$(bd show "$WORK_BEAD_ID" --json | jq -r 'if type=="array" then .[0] else . end | .metadata["gc.bug_category"] // empty')
+UPSTREAM_SHA=$(bd show "$WORK_BEAD_ID" --json | jq -r 'if type=="array" then .[0] else . end | .metadata["gc.upstream_sha"] // empty')
+BRANCH=$(git branch --show-current)
+```
+Pull the bug summary, reproducer, expected-vs-actual, root cause, the MWE/benchmark,
+and the branch + base from YOUR confirm-reproduce and implement runs (recorded on
+the bead) — never from the seed's original prose.
+
+**2. Fill the ISSUE draft** from `issue.md`:
+- Set the template's title heading to a crisp one-line bug summary (it becomes the
+  issue title).
+- Summary / Reproduction (the self-contained MWE) / Expected / Actual (your observed
+  output) / Root cause (file:line + mechanism) / Proposed fix. Origin-free throughout.
+
+**3. Fill the PR draft** from `pr.md`:
+- Set the title heading to the fix's imperative subject.
+- KEEP the literal `Closes #<issue>` placeholder — the issue number does not exist
+  until a human files it downstream.
+- What this changes / Reproduction-regression (the red-on-master MWE for correctness,
+  or the benchmark for perf — measured on {{base_branch}} @ $UPSTREAM_SHA, regime
+  $REGIME) / Validation (full file/suite stays green).
+
+**4. Disclosure — insert and FLAG, never fill:**
+Include `disclosure.md` VERBATIM (it is intentionally empty) and flag it for the
+human. A polecat NEVER writes disclosure content — responsible-disclosure is a
+human-attributed judgment call made downstream at filing time.
+
+**5. Store the drafts INLINE on the seed bead** (the .4->.5 handoff contract: the
+drafts live in the bead's `design` field; push-and-handoff reassigns the bead
+carrying them):
+```bash
+bd update "$WORK_BEAD_ID" --design "$(cat <<'DRAFTS'
+=== ISSUE DRAFT (ready to file; origin-free) ===
+<filled issue.md>
+
+=== PR DRAFT (branch <BRANCH> -> <base>; Closes #<issue> placeholder intact) ===
+<filled pr.md>
+
+=== DISCLOSURE (v1 placeholder — FLAGGED FOR HUMAN; do not file without completing) ===
+<verbatim disclosure.md>
+DRAFTS
+)"
+```
+Do NOT commit the drafts to the branch.
+
+**Exit criteria:** complete issue + PR drafts (origin-free; PR carries
+`Closes #<issue>`) stored inline in the seed bead's `design` field, with the
+disclosure placeholder present and flagged for the human. Nothing committed to the
+branch."""
+
+# --- push-and-handoff: NEW terminal (stub) ---
+[[steps]]
+id = "push-and-handoff"
+title = "Push branch (or local), reassign seed bead, drain (non-filing terminal)"
+needs = ["draft-artifacts"]
+description = """
+[STUB — not yet fleshed out.]
+
+Non-filing terminal. Push the feature branch to {{push_remote}} (empty => keep
+the branch local-only), then UPDATE + REASSIGN the existing seed bead to
+{{handoff_target}} (empty => resolve rig crew -> mayor) carrying the issue/PR
+drafts, the branch name + base, the verification evidence, and a READY-TO-FILE
+status line. Leave the bead OPEN (the human is the gate). NEVER opens an issue or
+PR — that public, human-attributed step happens downstream.
+
+Terminal outcomes:
+- Success -> push + status READY TO FILE + reassign to handoff_target + drain-ack.
+- Investigative dead-end -> status ESCALATE: <reason> + evidence inline; NO push;
+  reassign + drain-ack.
+- Functional block (env won't build, tests won't run) -> MAIL THE MAYOR; do NOT
+  drain — hold the session alive for the mayor to inspect/unblock.
+
+Exit criteria: branch pushed-or-local, seed bead updated + reassigned to the
+handoff target, session drained (success/escalate) or held (functional block)."""

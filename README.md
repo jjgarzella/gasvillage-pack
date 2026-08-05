@@ -14,7 +14,7 @@ always-on agent.
 |-----------|-------|-------------------------|---------------|
 | `mayor`   | city  | always-on               | Coordinator. Plans, dispatches, manages rigs. |
 | `crew`    | rig   | user-named, persistent  | Your hands-on workspace inside a rig. Like a vanilla Claude Code session, with bead/mail awareness. |
-| `polecat` | rig   | ephemeral, scale 0–5    | Slung-to worker. Spin up, do task, die after 2h idle. |
+| `polecat` | rig   | ephemeral, scale 0–1    | Slung-to worker. Spin up, do task, die after 2h idle. |
 
 Beads, mail, wisps, and Dolt come from the underlying Gas City framework
 and work the same as in Gas Town.
@@ -100,11 +100,12 @@ Don't declare `session_live` here — it's inherited from the pack's `[global]`
 template = "alice"
 scope = "rig"
 dir = "my-project"
-mode = "always"
+mode = "on_demand"
 ```
 
-Run `gc start` and the crew member comes up as a stable session
-`my-project/alice`.
+Run `gc start` and the crew member registers but stays asleep until
+woken — by routed work or `gc session wake my-project/alice`. Use
+`mode = "always"` instead for a permanently-awake member.
 
 > **The load-bearing rule:** `dir = "my-project"` must appear in **both**
 > `agent.toml` and the `[[named_session]]`, and they must match. That `dir`
@@ -132,8 +133,7 @@ so it's picked up.
 - **One always-on session** (mayor) instead of Gas Town's three (mayor,
   deacon, boot) plus per-rig witness/refinery.
 - **Polecats** are pure on-demand (`min=0`).
-- **Crew** is user-driven, so token use tracks human activity — naturally
-  bounded.
+- **Crew** are `on_demand`, so they cost resources only while working.
 
 ### Note on mayor idle-sleep (v1 simplification)
 
