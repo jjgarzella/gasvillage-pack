@@ -157,8 +157,8 @@ trap - EXIT HUP INT TERM
 mkdir -p "$WT/.beads"
 echo "$RIG_ROOT/.beads" > "$WT/.beads/redirect"
 
-# Submodule init (best-effort).
-git -C "$WT" submodule init 2>/dev/null || true
+# Submodule checkout (best-effort): populate content, not just config.
+git -C "$WT" submodule update --init 2>/dev/null || true
 
 # Keep runtime ignores local to git metadata instead of mutating the tracked
 # repository .gitignore. --git-path resolves the exclude file Git actually
