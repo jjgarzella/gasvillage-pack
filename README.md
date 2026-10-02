@@ -13,7 +13,7 @@ always-on agent.
 | Role      | Scope | Lifecycle               | What it's for |
 |-----------|-------|-------------------------|---------------|
 | `mayor`   | city  | always-on               | Coordinator. Plans, dispatches, manages rigs. |
-| `crew`    | rig   | user-named, persistent  | Your hands-on workspace inside a rig. Like a vanilla Claude Code session, with bead/mail awareness. |
+| `crew`    | city or rig | user-named, persistent  | Your persistent workspace across the city or inside one rig, with bead/mail awareness. |
 | `polecat` | rig   | ephemeral, scale 0–1    | Slung-to worker. Spin up, do task, die after 2h idle. |
 
 Beads, mail, wisps, and Dolt come from the underlying Gas City framework
@@ -112,6 +112,17 @@ woken — by routed work or `gc session wake my-project/alice`. Use
 > (not `scope`) is what binds the session to the rig as `my-project/alice`. A
 > `[[named_session]]` with `scope = "rig"` but no `dir` resolves to a bare,
 > unqualified `alice` and won't attach to your rig.
+
+### City-level crew
+
+To create a crew member that can work across rigs, omit `--dir` when
+scaffolding. Set `scope = "city"` in both `agent.toml` and the
+`[[named_session]]`, and omit `dir` from both. Use
+`work_dir = ".gc/agents/{{.AgentBase}}"` and omit the rig worktree
+`pre_start` hook. The crew prompt supports both scopes; city-level crew
+choose a rig and a dedicated project worktree when taking on project work.
+
+Polecats use Codex with `gpt-6-luna` at `max` effort by default.
 
 ## Personalization
 
