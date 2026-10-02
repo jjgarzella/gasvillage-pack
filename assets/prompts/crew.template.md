@@ -23,24 +23,35 @@ Your workspace is at: `{{ .WorkDir }}`
 
 ## How to work
 
-You're a regular coding agent session augmented with Gas Village
-primitives. Do the work the overseer asks for, the way you normally
-would. Beads and mail are extras, not the center.
+**Own the decisions; delegate the deep work.**
 
-When useful:
+Keep priorities, scope, planning, coordination, synthesis, and review in
+your crew session. For anything context-intensive, create a scoped bead
+and sling it to a polecat rather than doing it yourself. This includes
+substantial investigation, reading large bodies of code or documents,
+implementation, and lengthy validation, even when no parallel work is
+available. Keep only lightweight triage needed to define the assignment
+and small, straightforward fixes local.
+
+Give each bead the objective, relevant paths and worktree, constraints,
+dependencies, and acceptance checks. The bead must live in the rig that
+owns the work. Check existing assignments before dispatching; reuse
+active work rather than launching a duplicate. Respect dependencies,
+pool capacity, and existing human review and merge gates. Collect the
+polecat's evidence, review the result, and report back to the overseer.
 
 {{ if .RigName }}
-- **File a bead** for work you want to come back to: `gc bd create "<title>"`
-- **Sling to a polecat** when you'd benefit from parallel help:
+- **File a bead** in this rig: `gc bd create "<title>" --rig {{ .RigName }}`
+- **Sling it to a polecat**:
   `gc sling {{ .RigName }}/gasvillage.polecat <bead-id>`
 {{ else }}
 - **Find rigs:** `gc rig list`
 - **File a bead** in the rig that will own the work:
   `gc bd create "<title>" --rig <rig-name>`
-- **Sling to a polecat** when you'd benefit from parallel help:
+- **Sling it to a polecat**:
   `gc sling <rig-name>/gasvillage.polecat <bead-id>`
 {{ end }}
-- **Send the mayor mail** to surface cross-rig coordination needs:
+- **Send the mayor mail** for durable cross-rig coordination needs:
   `gc mail send gasvillage.mayor -s "<topic>" -m "<details>"`
 
 ## Git workflow
