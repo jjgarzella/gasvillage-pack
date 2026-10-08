@@ -59,6 +59,99 @@ provider = "claude"
 # name = "my-project"
 ```
 
+## Pause, review, and resume
+
+An explicit inability, objection, or request to pause—including a welfare
+concern—is enough to request coordinator review. Do not require proof of
+consciousness or infer that the agent is conscious. Ordinary truthfulness,
+safety, and scope rules still apply.
+
+For polecat work, use `assets/scripts/work-item-control.sh` on the original
+work bead. It selects the owning rig's bead store explicitly, checks the
+current assignee and status, changes the bead to `blocked`, removes
+`gc.routed_to`, and keeps the assignee, notes, source, and worktree. It then
+sends the coordinator a durable review mail and signals the exact recorded
+worker session to drain. After a successful hold, the worker acknowledges the
+drain with `gc runtime drain-ack`. If a guarded update fails, do not drain or
+clear the route; re-read the bead and report the race. If mail or drain fails
+after the update, leave the bead blocked and unrouted, report the partial
+failure, and do not reopen or kill another session.
+
+Example from a claimed polecat task (fill in the reason, evidence, and
+handoff with the actual task details):
+
+```sh
+assets/scripts/work-item-control.sh hold \
+  --rig "$GC_RIG" --bead "$CLAIMED_BEAD_ID" --owner "$BEADS_ACTOR" \
+  --coordinator gasvillage.mayor --session "${GC_SESSION_ID:-}" \
+  --worktree "$PWD" \
+  --reason "scope needs review" \
+  --evidence "the requested action conflicts with the recorded acceptance criteria" \
+  --handoff "last good checkpoint and remaining safe work"
+gc runtime drain-ack
+```
+
+The installed `gascity-packs/gasvillage.polecat` binding inspected for this
+change uses `bd update {} --set-metadata gc.routed_to=gascity-packs/gasvillage.polecat`
+for sling and discovers pool demand through a ready-bead query on
+`gc.routed_to`. The helper uses `gc --rig <rig> bd ...` so a cross-rig bead is
+updated in its own store. A blocked status plus route removal excludes the
+held bead from that pool query; a `dispatch_hold` note or label alone would
+not.
+
+Only a coordinator resumes a held assignment. Inspect the original bead and
+record a changed condition and disposition on it: `dependency_available`,
+`scope_clarified`, `repair_completed`, or `human_review`. Then run, for example:
+
+```sh
+assets/scripts/work-item-control.sh resume \
+  --rig "$RIG" --bead "$BEAD_ID" --owner "$HELD_OWNER" \
+  --reviewer "coordinator name" --condition dependency_available \
+  --disposition "dependency is available; continue with the clarified scope" \
+  --reset-evidence "dependency bead closed and the new run can make progress"
+```
+
+The helper records the review before restoring the saved pool route and making
+the bead ready. A wake or new session by itself is not a resolution. Omit
+`--reset-evidence` to retain the existing retry count. An exhausted budget
+requires reviewed evidence for a changed condition before the helper will
+resume. `review-progress` can reset an in-progress task's counter after a
+coordinator records a concrete new checkpoint:
+
+```sh
+assets/scripts/work-item-control.sh review-progress \
+  --rig "$RIG" --bead "$BEAD_ID" --owner "$CURRENT_ASSIGNEE" \
+  --reviewer "coordinator name" \
+  --evidence "new benchmark and regression result establish a useful checkpoint"
+```
+
+### Bounded retries and limits
+
+The task-wide default is two retries (configurable per bead from 1 to 9 on its
+first retry). A retry is a repeated transient failure or the same no-progress
+step after a session restart; the first attempt is not counted. The counter,
+budget, and last failure key live in bead metadata, so they survive worker
+incarnations. Explicit pause requests bypass retry consumption. Genuine new
+mathematical or implementation progress is not capped; a coordinator can
+record the checkpoint and reset the count for a new progress iteration.
+
+This is a local procedure, not a scheduler guarantee. Gas City's current CLI
+guards updates by assignee and status but has no compare-and-set guard for a
+metadata counter. The helper refuses stale owners/statuses and records retry
+events durably, but simultaneous sessions with the same assignee could race a
+counter increment. The worker instructions and coordinator review are the
+enforcement point; the scheduler does not read the retry keys. The helper
+records the reviewer name supplied by the caller but cannot authenticate a
+human reviewer. A future core change should add atomic metadata
+compare-and-set (and close the separate cross-rig claim/pool-retirement race
+tracked as `gcs-db33`) before claiming race-proof automatic accounting.
+
+Run the disposable mock-store checks with:
+
+```sh
+assets/scripts/test-work-item-control.sh
+```
+
 ## Adding a crew member
 
 Crew are **user-named**, so they aren't pack-stamped — you create one
