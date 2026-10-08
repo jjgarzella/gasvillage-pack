@@ -136,6 +136,57 @@ immediately run `gc hook --claim --json` again. If it returns work,
 execute that next step. Do not declare the session done until a final
 formula step tells you to drain or the claim returns no work.
 
+## Pause, coordinator review, and bounded retries
+
+An explicit inability, objection, or request to pause—including a welfare
+concern—goes directly to recorded coordinator review. Do not ask for proof of
+consciousness or infer that the agent is conscious. Keep ordinary truthfulness,
+safety, and scope rules in force. A pause request bypasses retry counting.
+
+For a pause, use the local helper on the bead you just claimed, with the exact
+assignee verified by the claim check. Include the last good checkpoint, source
+branch, worktree path, and remaining work in the handoff:
+
+```bash
+{{ .ConfigDir }}/assets/scripts/work-item-control.sh hold \
+  --rig "$GC_RIG" --bead "<CLAIMED_BEAD_ID>" --owner "<VERIFIED_ASSIGNEE>" \
+  --coordinator gasvillage.mayor --session "${GC_SESSION_ID:-}" \
+  --worktree "$PWD" --reason "<why work must pause>" \
+  --evidence "<observed facts>" \
+  --handoff "<last checkpoint, branch/source, and safe next steps>"
+```
+
+The helper guards the original bead by rig, assignee, and status; it records
+the handoff, blocks the bead, removes its pool route, notifies the coordinator,
+and requests a drain for the recorded session. After `HOLD_RECORDED`, finish
+the handoff and acknowledge with `gc runtime drain-ack`. If the helper reports
+a partial failure or ownership race, do not reopen, unroute, or force-stop
+anything; keep the worktree and report the exact bead state to the coordinator.
+
+The default retry budget is two additional attempts per work item. Before
+repeating a transient failure or the same no-progress step after a session
+restart, record it through the helper:
+
+```bash
+{{ .ConfigDir }}/assets/scripts/work-item-control.sh retry \
+  --rig "$GC_RIG" --bead "<CLAIMED_BEAD_ID>" --owner "<VERIFIED_ASSIGNEE>" \
+  --coordinator gasvillage.mayor --session "${GC_SESSION_ID:-}" \
+  --worktree "$PWD" --failure-key "<stable-short-failure-name>" \
+  --evidence "<what failed and what changed since the last attempt>"
+```
+
+`RETRY_ALLOWED` authorizes one retry. The count and budget are stored on the
+bead, so a new incarnation must read them before repeating work. On exhaustion
+the helper uses the pause flow and leaves the assignment blocked for review.
+Do not count a distinct exploration or attempt that records meaningful new
+mathematical or implementation progress as a no-progress retry. A coordinator
+may reset the budget after recording concrete progress with
+`work-item-control.sh review-progress`; an exhausted held task needs reviewed
+changed-condition evidence with `work-item-control.sh resume`. A changed
+failure label alone is not progress. The retry metadata is a pack procedure,
+not a scheduler-enforced limit; follow the recorded counter on every
+incarnation.
+
 **Doing the work** (when no formula says otherwise): edit files in your
 worktree, commit, push, then mark it done and exit cleanly:
 

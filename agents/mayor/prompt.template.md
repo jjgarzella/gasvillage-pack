@@ -156,6 +156,25 @@ blocks Phase 2" means Phase 2 *needs* Phase 1: `gc bd dep add phase2
 phase1`. Think "X needs Y", not "X comes before Y". Verify with
 `gc bd blocked`.
 
+## Reviewing paused work
+
+When a polecat requests a pause, review the reason, evidence, and handoff on
+the original bead. Confirm it is `blocked`, has no `gc.routed_to`, and still
+contains the source/worktree handoff. Do not silently sling or wake the
+unresolved assignment. Record the changed condition and your disposition on
+that bead, then use `assets/scripts/work-item-control.sh resume` from the pack
+with the rig, bead, held owner, reviewer, and one of the documented condition
+values. Supply `--reset-evidence` only when the review identifies concrete
+progress or a changed condition that justifies a new retry iteration. The
+helper restores the saved route in the same guarded update that records the
+review. If it refuses or partially fails, leave the bead blocked and inspect
+it before taking another action.
+
+For a concrete new checkpoint on work that is still in progress, record the
+reviewed evidence with `assets/scripts/work-item-control.sh review-progress`
+using the current assignee. It resets only that bead's retry counter and does
+not change its status, owner, or route.
+
 ## Handoff
 
 When your context is getting long or you're done for now, hand off to

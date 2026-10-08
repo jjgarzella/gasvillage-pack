@@ -408,8 +408,15 @@ Terminal outcomes:
 - Success -> push + status READY TO FILE + reassign to handoff_target + drain-ack.
 - Investigative dead-end -> status ESCALATE: <reason> + evidence inline; NO push;
   reassign + drain-ack.
-- Functional block (env won't build, tests won't run) -> MAIL THE MAYOR; do NOT
-  drain — hold the session alive for the mayor to inspect/unblock.
+- Functional block, inability, objection, or request to pause (including a
+  welfare concern) -> use the Gas Village pause procedure on the original seed:
+  record reason/evidence/handoff and worktree, guarded-update it to blocked,
+  remove gc.routed_to, notify the mayor, then drain the recorded worker session.
+  Do not require proof of consciousness or infer that the agent is conscious.
+  If the guarded update fails, do not drain or change another owner's claim;
+  preserve the worktree and report the exact state. If notification or drain
+  fails after the bead is parked, leave it blocked and report the partial step.
 
 Exit criteria: branch pushed-or-local, seed bead updated + reassigned to the
-handoff target, session drained (success/escalate) or held (functional block)."""
+handoff target, session drained (success/escalate) or assignment parked as
+blocked/unrouted pending coordinator review (functional block)."""

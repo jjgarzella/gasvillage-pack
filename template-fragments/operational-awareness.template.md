@@ -79,4 +79,18 @@ If commands hang, time out, or return unexpected empty results:
 
 Orphan databases accumulate over time. Use `gc dolt cleanup` to remove
 them — **never** `rm -rf` on Dolt data directories.
+
+### Pause and coordinator review
+
+An explicit inability, objection, or request to pause—including a
+welfare-related concern—goes directly to recorded coordinator review. Do not
+require proof of consciousness, and do not treat the request as a finding that
+an agent is conscious. Truthfulness, safety, and scope rules remain in force.
+
+Record the reason, evidence, and handoff on the original work bead. A note,
+mail, or `dispatch_hold` field alone does not park work: the assignment must
+be blocked and removed from its pool route, and the worker must drain through
+the supported session controls. Resume only after the coordinator records a
+changed condition and disposition on that same bead. Waking a new session or
+incarnation alone does not resolve the pause.
 {{ end }}
