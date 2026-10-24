@@ -11,7 +11,7 @@ default_sling_formula = "mol-polecat-implement"
 pre_start = ["{{.ConfigDir}}/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
 idle_timeout = "2h"
 min_active_sessions = 0
-max_active_sessions = 1
+max_active_sessions = 3
 
 [option_defaults]
 model = "gpt-6-luna"

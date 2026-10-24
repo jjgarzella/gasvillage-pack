@@ -324,7 +324,7 @@ review_progress() {
 [Gas Village coordinator-reviewed progress]
 Reviewer: $REVIEWER
 Progress evidence: $EVIDENCE
-Task-wide retry count reset to zero for a new progress iteration. This record does not change the bead's owner, status, or route.
+Task-wide retry count reset to zero for a new progress iteration. This record does not change the owner, status, or route of the bead.
 EOF
 )"
   if ! "$GC_BIN" --rig "$RIG" bd update "$BEAD" \

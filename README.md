@@ -14,7 +14,7 @@ always-on agent.
 |-----------|-------|-------------------------|---------------|
 | `mayor`   | city  | always-on               | Coordinator. Plans, dispatches, manages rigs. |
 | `crew`    | city or rig | user-named, persistent  | Your persistent workspace across the city or inside one rig, with bead/mail awareness. |
-| `polecat` | rig   | ephemeral, scale 0–1    | Slung-to worker. Spin up, do task, die after 2h idle. |
+| `polecat` | rig   | ephemeral, scale 0–3    | Slung-to worker. Spin up, do task, die after 2h idle. |
 
 Beads, mail, wisps, and Dolt come from the underlying Gas City framework
 and work the same as in Gas Town.
@@ -177,7 +177,7 @@ dir = "my-project"
 wake_mode = "fresh"
 work_dir = ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
 idle_timeout = "4h"
-max_active_sessions = 1
+max_active_sessions = 3
 nudge = "Check your hook and mail, then act accordingly."
 pre_start = ["{{.CityRoot}}/packs/gasvillage/assets/scripts/worktree-setup.sh {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"]
 ```

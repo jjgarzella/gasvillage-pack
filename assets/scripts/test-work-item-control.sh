@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 HELPER="$SCRIPT_DIR/work-item-control.sh"
+bash -n "$HELPER"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 export MOCK_STATE="$TMP/bead.json" MOCK_LOG="$TMP/calls.log" MOCK_RACE_MARK="$TMP/raced"
@@ -70,11 +71,11 @@ if [[ "${1:-}" == bd && "${2:-}" == update ]]; then
   cp "$MOCK_STATE" "$temp"
   if [[ -n "$status" ]]; then jq --arg v "$status" '.[0].status=$v' "$temp" >"$temp.next"; mv "$temp.next" "$temp"; fi
   if [[ "$assignee" != __KEEP__ ]]; then jq --arg v "$assignee" '.[0].assignee=$v' "$temp" >"$temp.next"; mv "$temp.next" "$temp"; fi
-  for pair in "${set_meta[@]}"; do
+  for pair in ${set_meta[@]+"${set_meta[@]}"}; do
     key="${pair%%=*}"; value="${pair#*=}"
     jq --arg k "$key" --arg v "$value" '.[0].metadata[$k]=$v' "$temp" >"$temp.next"; mv "$temp.next" "$temp"
   done
-  for key in "${unset_meta[@]}"; do
+  for key in ${unset_meta[@]+"${unset_meta[@]}"}; do
     jq --arg k "$key" 'del(.[0].metadata[$k])' "$temp" >"$temp.next"; mv "$temp.next" "$temp"
   done
   if [[ -n "$append_notes" ]]; then
