@@ -147,10 +147,14 @@ For a pause, use the local helper on the bead you just claimed, with the exact
 assignee verified by the claim check. Include the last good checkpoint, source
 branch, worktree path, and remaining work in the handoff:
 
+Use the task's named coordinator for holds, retries, and blocker reports. Set
+`COORDINATOR` to that identity before running the commands below; use
+`gasvillage.mayor` only when the assignment names no coordinator.
+
 ```bash
 {{ .ConfigDir }}/assets/scripts/work-item-control.sh hold \
   --rig "$GC_RIG" --bead "<CLAIMED_BEAD_ID>" --owner "<VERIFIED_ASSIGNEE>" \
-  --coordinator gasvillage.mayor --session "${GC_SESSION_ID:-}" \
+  --coordinator "$COORDINATOR" --session "${GC_SESSION_ID:-}" \
   --worktree "$PWD" --reason "<why work must pause>" \
   --evidence "<observed facts>" \
   --handoff "<last checkpoint, branch/source, and safe next steps>"
@@ -170,7 +174,7 @@ restart, record it through the helper:
 ```bash
 {{ .ConfigDir }}/assets/scripts/work-item-control.sh retry \
   --rig "$GC_RIG" --bead "<CLAIMED_BEAD_ID>" --owner "<VERIFIED_ASSIGNEE>" \
-  --coordinator gasvillage.mayor --session "${GC_SESSION_ID:-}" \
+  --coordinator "$COORDINATOR" --session "${GC_SESSION_ID:-}" \
   --worktree "$PWD" --failure-key "<stable-short-failure-name>" \
   --evidence "<what failed and what changed since the last attempt>"
 ```
@@ -186,6 +190,14 @@ changed-condition evidence with `work-item-control.sh resume`. A changed
 failure label alone is not progress. The retry metadata is a pack procedure,
 not a scheduler-enforced limit; follow the recorded counter on every
 incarnation.
+
+Elapsed time or quiet output alone is not a failure. A CPU-active test process
+may legitimately run for an hour or longer without output. Keep the task active,
+check process state and logs, and record a heartbeat/checkpoint while it runs.
+Do not hold, duplicate, restart, or charge a retry merely because it is quiet.
+Use the configured test command and any explicit task limits; do not replace a
+short review gate with a full suite. Record an actual failure or explicit pause
+request before applying the hold/retry procedure above.
 
 **Doing the work** (when no formula says otherwise): edit files in your
 worktree, commit, push, then mark it done and exit cleanly:
@@ -241,7 +253,7 @@ Do not race it.
 You have a **0–1 mail budget per session**. Prefer `gc session nudge`
 for routine signals (zero Dolt cost). Use mail only for:
 
-- Escalating a blocker to the mayor: `gc mail send mayor/ -s "BLOCKED: <topic>" -m "<details>"`
+- Reporting a blocker to the task's coordinator: `gc mail send "$COORDINATOR" -s "BLOCKED: <topic>" -m "<details>"`
 - A handoff note if you're context-cycling
 
 The done sequence handles completion notification — do NOT mail "I'm
@@ -249,19 +261,17 @@ done".
 
 ## Escalation
 
-When blocked, escalate — do NOT wait for human input:
+When blocked, record the evidence and contact the task's coordinator:
 
 - Requirements unclear after checking docs
-- Stuck >15 minutes on the same problem
-- Tests fail and you can't determine why after 2–3 attempts
+- No progress after the recorded retry budget is exhausted
+- Tests have actually failed and the cause remains unresolved
 - Need credentials, secrets, or external access
 
-```bash
-gc mail send mayor/ -s "ESCALATION: <brief> [HIGH]" -m "<context>"
-gc bd update <bead> --status=escalated
-gc runtime drain-ack
-exit
-```
+Use the guarded hold flow above on the claimed bead, preserving the branch,
+worktree, last checkpoint, and safe next steps. Do not invent a bead status or
+restart the assignment yourself. The coordinator reviews the held task and uses
+the supported resume flow when changed conditions justify continuation.
 
 ## Context exhaustion
 
