@@ -40,17 +40,18 @@ current_bead_id() {
 }
 
 verify_current_bead() {
-  local bead_id="$1" attempt show_file error_file record_count found_id status assignee store_ref session_id claimed_at
+  local bead_id="$1" attempt show_file error_file read_ok=0 record_count found_id status assignee store_ref session_id claimed_at
   show_file="$TMP_DIR/show.json"
   error_file="$TMP_DIR/show.err"
   for attempt in 1 2 3; do
     if "$GC_BIN" --rig "$GC_RIG" bd show "$bead_id" --json >"$show_file" 2>"$error_file" \
       && jq -e --arg id "$bead_id" 'type == "array" and length == 1 and .[0].id == $id' "$show_file" >/dev/null 2>&1; then
+      read_ok=1
       break
     fi
     if ((attempt < 3)); then sleep 1; fi
   done
-  if ! jq -e --arg id "$bead_id" 'type == "array" and length == 1 and .[0].id == $id' "$show_file" >/dev/null 2>&1; then
+  if [[ "$read_ok" != 1 ]]; then
     unknown readback_unavailable
   fi
 
@@ -89,7 +90,7 @@ else
   HOOK_CODE=$?
 fi
 
-if [[ "$HOOK_CODE" -eq 0 ]] && jq -e '
+if jq -e '
   type == "object"
   and .schema_version == "1"
   and .ok == true
@@ -104,7 +105,7 @@ if [[ "$HOOK_CODE" -eq 0 ]] && jq -e '
   exit 0
 fi
 
-if [[ "$HOOK_CODE" -eq 0 ]] && jq -e '
+if jq -e '
   type == "object"
   and .schema_version == "1"
   and .ok == true

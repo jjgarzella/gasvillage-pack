@@ -1,7 +1,9 @@
 # Claim result recovery: operator rollout and rollback
 
-This change updates the polecat prompt and its claim helper. It does not
-change the core CLI or any live bead. Review and merge the pack change through
+This change updates the polecat prompt and its claim helper; no bead migration
+is required. Syncing the pack leaves existing bead records untouched. New
+sessions use the normal atomic claim flow, and a clean empty result is followed
+by the normal drain acknowledgment. Review and merge the pack change through
 the repository's normal human gate before deploying it.
 
 ## Rollout
