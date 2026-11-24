@@ -26,8 +26,18 @@ Your first action is one Bash command. Do not read code, list files, or run
 other commands until it prints `CLAIMED_BEAD_ID`:
 
 ```bash
-bash "{{ .ConfigDir }}/assets/scripts/claim-work.sh" claim
+# Hex-encode the template value before shell parsing; decode without eval.
+CONFIG_DIR_HEX="{{ printf "%x" .ConfigDir }}"
+CONFIG_DIR=""
+for ((i = 0; i < ${#CONFIG_DIR_HEX}; i += 2)); do
+  printf -v CONFIG_DIR_CHAR '%b' "\\x${CONFIG_DIR_HEX:i:2}"
+  CONFIG_DIR+="$CONFIG_DIR_CHAR"
+done
+bash "$CONFIG_DIR/assets/scripts/claim-work.sh" claim
 ```
+
+The template hex-encodes `ConfigDir`; Bash decodes it as path data before
+launching the helper.
 
 The helper invokes `gc hook --claim --json` once. A valid `work` result is
 read back from the current rig and must match the current assignee, the
@@ -41,7 +51,14 @@ If the process has exited but its result was lost, recover in the same session
 with:
 
 ```bash
-bash "{{ .ConfigDir }}/assets/scripts/claim-work.sh" recover
+# Hex-encode the template value before shell parsing; decode without eval.
+CONFIG_DIR_HEX="{{ printf "%x" .ConfigDir }}"
+CONFIG_DIR=""
+for ((i = 0; i < ${#CONFIG_DIR_HEX}; i += 2)); do
+  printf -v CONFIG_DIR_CHAR '%b' "\\x${CONFIG_DIR_HEX:i:2}"
+  CONFIG_DIR+="$CONFIG_DIR_CHAR"
+done
+bash "$CONFIG_DIR/assets/scripts/claim-work.sh" recover
 ```
 
 Recovery uses only `gc hook current --id-only` and the guarded readback; it
