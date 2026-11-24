@@ -17,15 +17,37 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected '$2', got '$1'"; }
 assert_has() { grep -Fq -- "$2" "$1" || fail "'$2' not found in $1"; }
 assert_lacks() { ! grep -Fq -- "$2" "$1" || fail "unexpected '$2' in $1"; }
-assert_output_has() { assert_has <(printf '%s\n' "$OUTPUT") "$1"; }
+assert_output_has() { assert_has "$TMP/stdout" "$1"; }
+assert_output_lacks() { assert_lacks "$TMP/stdout" "$1"; }
+assert_stderr_has() { assert_has "$TMP/stderr" "$1"; }
 assert_calls() { assert_eq "$(grep -c "^$1\$" "$MOCK_LOG" || true)" "$2"; }
 
-# run CMD... captures combined output in OUTPUT and the exit status in RC.
+readonly MARKER_LINE='^(CLAIMED_BEAD_ID=[A-Za-z0-9._-]+|CLAIM_RECOVERED reason=[a-z_]+|NO_ROUTED_WORK reason=no_work|SESSION_DRAINED reason=[a-z_]+|CLAIM_UNKNOWN reason=[a-z_]+|CLAIM_REJECTED reason=[a-z_]+)$'
+readonly MARKER_PREFIX='(CLAIMED_BEAD_ID|CLAIM_RECOVERED|NO_ROUTED_WORK|SESSION_DRAINED|CLAIM_UNKNOWN|CLAIM_REJECTED)'
+readonly TERMINAL_MARKER='^(CLAIMED_BEAD_ID=|NO_ROUTED_WORK |SESSION_DRAINED |CLAIM_UNKNOWN |CLAIM_REJECTED )'
+
+# assert_stream_contract checks the helper's stdout/stderr contract for the
+# last run: stdout holds only marker lines, stderr holds no marker, and every
+# non-usage exit prints exactly one terminal marker.
+assert_stream_contract() {
+  local line terminal expected=1
+  while IFS= read -r line; do
+    [[ "$line" =~ $MARKER_LINE ]] || fail "non-marker line on stdout: $line"
+  done <"$TMP/stdout"
+  ! grep -Eq "$MARKER_PREFIX" "$TMP/stderr" || fail "marker written to stderr: $(cat "$TMP/stderr")"
+  terminal="$(grep -Ec "$TERMINAL_MARKER" "$TMP/stdout" || true)"
+  [[ "$RC" != 64 ]] || expected=0
+  [[ "$terminal" == "$expected" ]] || fail "expected $expected terminal marker(s), got $terminal: $(cat "$TMP/stdout")"
+}
+
+# run CMD... captures stdout and stderr separately in $TMP/stdout and
+# $TMP/stderr, the exit status in RC, and checks the stream contract.
 run() {
   set +e
-  OUTPUT="$("$@" 2>&1)"
+  "$@" >"$TMP/stdout" 2>"$TMP/stderr"
   RC=$?
   set -e
+  assert_stream_contract
 }
 
 # The mock records the claim under MOCK_ASSIGNEE, independently of the
@@ -37,6 +59,8 @@ rig=""
 if [[ "${1:-}" == --rig ]]; then rig="$2"; shift 2; fi
 printf '%s %s\n' "$rig" "$*" >>"$MOCK_LOG"
 
+# record_claim stamps the claim; MOCK_SKIP_POINTER=1 models a claim whose
+# current-claim stamp failed (the SDK does not fail the claim for that).
 record_claim() {
   jq --arg owner "${MOCK_ASSIGNEE:-session-a}" --arg session "${GC_SESSION_ID:-}" \
     '.[0].status="in_progress"
@@ -44,7 +68,7 @@ record_claim() {
      | .[0].metadata["gc.session_id"]=$session' \
     "$MOCK_STATE" >"$MOCK_STATE.tmp"
   mv "$MOCK_STATE.tmp" "$MOCK_STATE"
-  printf 'fx-1\n' >"$MOCK_CURRENT"
+  [[ "${MOCK_SKIP_POINTER:-}" == 1 ]] || printf 'fx-1\n' >"$MOCK_CURRENT"
   printf 'hook_claimed\n' >>"$MOCK_LOG"
 }
 
@@ -62,7 +86,8 @@ if [[ "${1:-}" == hook && "${2:-}" == --claim ]]; then
       [[ "${MOCK_HOOK_MODE}" != no_work_nonzero ]] || exit 1
       exit 0
       ;;
-    timeout)
+    timeout|timeout_claimed)
+      [[ "${MOCK_HOOK_MODE}" != timeout_claimed ]] || record_claim
       echo 'mock hook timed out' >&2
       exit 124
       ;;
@@ -70,7 +95,7 @@ if [[ "${1:-}" == hook && "${2:-}" == --claim ]]; then
       printf '{"schema_version":"1","ok":true,"command":"hook","action":"drain","reason":"claims_errored"}\n'
       exit 0
       ;;
-    stale_session|non_turn_context|drain_pending|missing_session_registration|stale_session_nonzero)
+    stale_session|non_turn_context|drain_pending|missing_session_registration|some_future_drain|stale_session_nonzero)
       reason="${MOCK_HOOK_MODE%_nonzero}"
       printf '{"schema_version":"1","ok":true,"command":"hook","action":"drain","reason":"%s"}\n' "$reason"
       [[ "${MOCK_HOOK_MODE}" != stale_session_nonzero ]] || exit 1
@@ -85,6 +110,19 @@ if [[ "${1:-}" == hook && "${2:-}" == --claim ]]; then
       ;;
     invalid_id)
       work_result "${MOCK_HOOK_BEAD_ID:-../x}"
+      exit 0
+      ;;
+    error_envelope_claimed)
+      # The real CLI's failure envelope after it claimed, e.g. when loading
+      # the canonical bead timed out.
+      record_claim
+      printf '{"schema_version":"1","ok":false,"command":"hook","error":{"code":"command_failed","message":"claimed fx-1 but loading canonical bead failed: timed out"}}\n'
+      exit 1
+      ;;
+    work_no_assignee)
+      # assignee is omitempty in the SDK result type.
+      record_claim
+      printf '{"schema_version":"1","ok":true,"command":"hook","action":"work","reason":"claimed","bead_id":"fx-1"}\n'
       exit 0
       ;;
     success|slow|lost_stdout|malformed|claimed_nonzero)
@@ -105,13 +143,22 @@ fi
 
 if [[ "${1:-}" == hook && "${2:-}" == current ]]; then
   printf 'current_calls\n' >>"$MOCK_LOG"
-  [[ -s "$MOCK_CURRENT" ]] || { echo 'no current bead' >&2; exit 1; }
+  if [[ "${MOCK_CURRENT_MODE:-}" == unavailable ]]; then
+    echo 'gc hook current: mock session store read timed out' >&2
+    exit 1
+  fi
+  if [[ ! -s "$MOCK_CURRENT" ]]; then
+    echo "gc hook current: session ${GC_SESSION_ID:-} has no current claim (nothing claimed through gc hook --claim)" >&2
+    exit 1
+  fi
   cat "$MOCK_CURRENT"
   exit 0
 fi
 
 if [[ "${1:-}" == bd && "${2:-}" == show ]]; then
   printf 'show_calls\n' >>"$MOCK_LOG"
+  # A rig-scoped read cannot see a bead the hook claimed from the city store.
+  [[ -z "$rig" ]] || { echo "mock: rig-scoped readback of $3" >&2; exit 7; }
   count=$(( $(cat "$MOCK_SHOW_COUNT" 2>/dev/null || echo 0) + 1 ))
   printf '%s\n' "$count" >"$MOCK_SHOW_COUNT"
   case "${MOCK_SHOW_MODE:-}" in
@@ -135,8 +182,9 @@ if [[ "${1:-}" == bd && "${2:-}" == show ]]; then
 fi
 
 if [[ "${1:-}" == runtime && "${2:-}" == drain-ack ]]; then
-  printf 'drain_ack\n' >>"$MOCK_LOG"
+  printf 'drain_ack %s\n' "${3:-}" >>"$MOCK_LOG"
   [[ "${MOCK_DRAIN_ACK_MODE:-}" != fail ]] || { echo 'mock drain ack failed' >&2; exit 1; }
+  echo 'mock: drain acknowledged'
   exit 0
 fi
 
@@ -155,7 +203,8 @@ reset_state() {
   : >"$MOCK_CURRENT"
   rm -f "$MOCK_HOOK_PID" "$MOCK_SHOW_COUNT"
   unset MOCK_HOOK_MODE MOCK_HOOK_DELAY MOCK_HOOK_REASON MOCK_HOOK_ASSIGNEE MOCK_HOOK_BEAD_ID \
-    MOCK_ASSIGNEE MOCK_SHOW_MODE MOCK_SHOW_FAILURES MOCK_READBACK MOCK_DRAIN_ACK_MODE
+    MOCK_ASSIGNEE MOCK_SHOW_MODE MOCK_SHOW_FAILURES MOCK_READBACK MOCK_DRAIN_ACK_MODE \
+    MOCK_SKIP_POINTER MOCK_CURRENT_MODE
 }
 
 # set_current_claimed [ASSIGNEE] stamps a verified claim and this session's pointer.
@@ -202,12 +251,11 @@ expect_rejected() {
 reset_state
 run "$HELPER"
 assert_eq "$RC" 64
-assert_output_has 'usage: claim-work.sh {claim|recover}'
+assert_stderr_has 'usage: claim-work.sh {claim|recover}'
 
 reset_state
-run env -u GC_RIG "$HELPER" claim
-assert_eq "$RC" 76
-assert_output_has 'CLAIM_REJECTED reason=missing_rig'
+run "$HELPER" bogus
+assert_eq "$RC" 64
 assert_lacks "$MOCK_LOG" 'hook_calls'
 
 reset_state
@@ -224,12 +272,20 @@ reset_state
 run "$HELPER" claim
 assert_eq "$RC" 0
 assert_output_has 'CLAIMED_BEAD_ID=fx-1'
-assert_lacks <(printf '%s\n' "$OUTPUT") 'CLAIM_RECOVERED'
+assert_output_lacks 'CLAIM_RECOVERED'
 assert_calls hook_calls 1
 assert_calls show_calls 1
 assert_lacks "$MOCK_LOG" 'current_calls'
-assert_has "$MOCK_LOG" 'research bd show fx-1 --json'
+assert_calls ' bd show fx-1 --json' 1
 assert_no_mutation
+
+# The readback is id-routed, never rig-scoped, so GC_RIG is not an input: the
+# hook may have claimed the bead from the city store.
+reset_state
+run env -u GC_RIG "$HELPER" claim
+assert_eq "$RC" 0
+assert_output_has 'CLAIMED_BEAD_ID=fx-1'
+assert_calls ' bd show fx-1 --json' 1
 
 # Any work reason is accepted, including reasons the SDK may add later.
 for reason in existing_assignment ready_assignment some_future_reason; do
@@ -280,7 +336,8 @@ for mode in no_work no_work_nonzero; do
   assert_calls hook_calls 1
   assert_lacks "$MOCK_LOG" 'current_calls'
   assert_lacks "$MOCK_LOG" 'show_calls'
-  assert_has "$MOCK_LOG" 'drain_ack'
+  assert_calls 'drain_ack session-a' 1
+  assert_stderr_has 'mock: drain acknowledged'
 done
 
 reset_state
@@ -288,6 +345,7 @@ export MOCK_HOOK_MODE=no_work MOCK_DRAIN_ACK_MODE=fail
 run "$HELPER" claim
 assert_eq "$RC" 75
 assert_output_has 'CLAIM_UNKNOWN reason=drain_ack_failed'
+assert_output_lacks 'NO_ROUTED_WORK'
 assert_calls hook_calls 1
 assert_has "$MOCK_LOG" 'drain_ack'
 assert_lacks "$MOCK_LOG" 'current_calls'
@@ -295,7 +353,7 @@ assert_lacks "$MOCK_LOG" 'show_calls'
 
 # --- lost or malformed results recover through the current pointer -----------
 
-for mode in lost_stdout malformed claimed_nonzero; do
+for mode in lost_stdout malformed claimed_nonzero error_envelope_claimed work_no_assignee timeout_claimed; do
   reset_state
   export MOCK_HOOK_MODE="$mode"
   run "$HELPER" claim
@@ -303,8 +361,12 @@ for mode in lost_stdout malformed claimed_nonzero; do
   assert_output_has 'CLAIMED_BEAD_ID=fx-1'
   case "$mode" in
     lost_stdout) assert_output_has 'CLAIM_RECOVERED reason=empty_result' ;;
-    malformed) assert_output_has 'CLAIM_RECOVERED reason=malformed_result' ;;
-    claimed_nonzero) assert_output_has 'CLAIM_RECOVERED reason=hook_failed' ;;
+    malformed|work_no_assignee) assert_output_has 'CLAIM_RECOVERED reason=malformed_result' ;;
+    claimed_nonzero|error_envelope_claimed) assert_output_has 'CLAIM_RECOVERED reason=hook_failed' ;;
+    timeout_claimed)
+      assert_output_has 'CLAIM_RECOVERED reason=hook_timeout'
+      assert_stderr_has 'mock hook timed out'
+      ;;
   esac
   assert_calls hook_calls 1
   assert_calls current_calls 1
@@ -337,15 +399,65 @@ assert_calls hook_calls 1
 assert_calls current_calls 1
 assert_calls show_calls 2
 
+# claims_errored consults the pointer: a claim this session holds is recovered.
+reset_state
+export MOCK_HOOK_MODE=claims_errored
+set_current_claimed
+run "$HELPER" claim
+assert_eq "$RC" 0
+assert_output_has 'CLAIM_RECOVERED reason=claim_error'
+assert_output_has 'CLAIMED_BEAD_ID=fx-1'
+assert_calls current_calls 1
+assert_no_mutation
+
+# An aliased session in the fallback has no hook assignee: any of the
+# session's identities may own the recovered bead.
+reset_state
+export MOCK_HOOK_MODE=lost_stdout MOCK_ASSIGNEE=alias-x
+run env GC_ALIAS=alias-x "$HELPER" claim
+assert_eq "$RC" 0
+assert_output_has 'CLAIM_RECOVERED reason=empty_result'
+assert_output_has 'CLAIMED_BEAD_ID=fx-1'
+
+# A stale pointer (the session's previous, already-closed step, as after a
+# formula continuation re-claim) never becomes ownership.
+for mode in claims_errored timeout; do
+  reset_state
+  export MOCK_HOOK_MODE="$mode" MOCK_READBACK=stale_status
+  set_current_claimed
+  run "$HELPER" claim
+  assert_eq "$RC" 76
+  assert_output_has 'CLAIM_REJECTED reason=stale_status'
+  assert_output_lacks 'CLAIMED_BEAD_ID'
+  assert_no_mutation
+done
+
+# A work result without an assignee whose pointer stamp failed is unknown.
+reset_state
+export MOCK_HOOK_MODE=work_no_assignee MOCK_SKIP_POINTER=1
+run "$HELPER" claim
+assert_eq "$RC" 75
+assert_output_has 'CLAIM_UNKNOWN reason=malformed_result_no_current_assignment'
+assert_no_mutation
+
+# A failed pointer lookup is not "nothing claimed".
+reset_state
+export MOCK_HOOK_MODE=timeout_claimed MOCK_CURRENT_MODE=unavailable
+run "$HELPER" claim
+assert_eq "$RC" 75
+assert_output_has 'CLAIM_UNKNOWN reason=hook_timeout_current_unavailable'
+assert_stderr_has 'mock session store read timed out'
+assert_no_mutation
+
 # Failed hooks with no pointer are unknown, and both CLI errors are reported.
 reset_state
 export MOCK_HOOK_MODE=timeout
 run "$HELPER" claim
 assert_eq "$RC" 75
 assert_output_has 'CLAIM_UNKNOWN reason=hook_timeout_no_current_assignment'
-assert_output_has 'mock hook timed out'
-assert_output_has 'gc hook current diagnostics:'
-assert_output_has 'no current bead'
+assert_stderr_has 'mock hook timed out'
+assert_stderr_has 'gc hook current diagnostics:'
+assert_stderr_has 'has no current claim'
 assert_calls hook_calls 1
 assert_calls current_calls 1
 assert_no_mutation
@@ -372,15 +484,40 @@ for mode in malformed_no_claim empty_no_claim; do
   assert_no_mutation
 done
 
-# --- explicit hook refusals never consult an older pointer --------------------
+# --- hook drains never consult an older pointer ------------------------------
 
-for reason in stale_session non_turn_context drain_pending missing_session_registration stale_session_nonzero; do
+# The SDK tells this session to stop and expects the turn to acknowledge it.
+for reason in stale_session drain_pending missing_session_registration stale_session_nonzero; do
+  reset_state
+  export MOCK_HOOK_MODE="$reason"
+  set_current_claimed
+  run "$HELPER" claim
+  assert_eq "$RC" 0
+  assert_output_has "SESSION_DRAINED reason=${reason%_nonzero}"
+  assert_output_lacks 'CLAIMED_BEAD_ID'
+  assert_calls hook_calls 1
+  assert_calls 'drain_ack session-a' 1
+  assert_lacks "$MOCK_LOG" 'current_calls'
+  assert_lacks "$MOCK_LOG" 'show_calls'
+  assert_lacks "$MOCK_LOG" 'bd update'
+done
+
+reset_state
+export MOCK_HOOK_MODE=drain_pending MOCK_DRAIN_ACK_MODE=fail
+run "$HELPER" claim
+assert_eq "$RC" 75
+assert_output_has 'CLAIM_UNKNOWN reason=drain_ack_failed'
+assert_output_lacks 'SESSION_DRAINED'
+
+# A non-turn refusal must not be acknowledged by this caller; an unknown
+# drain reason is treated the same way.
+for reason in non_turn_context some_future_drain; do
   reset_state
   export MOCK_HOOK_MODE="$reason"
   set_current_claimed
   run "$HELPER" claim
   assert_eq "$RC" 76
-  assert_output_has "CLAIM_REJECTED reason=${reason%_nonzero}"
+  assert_output_has "CLAIM_REJECTED reason=$reason"
   assert_calls hook_calls 1
   assert_lacks "$MOCK_LOG" 'current_calls'
   assert_lacks "$MOCK_LOG" 'show_calls'
@@ -394,8 +531,8 @@ export MOCK_HOOK_MODE=success MOCK_SHOW_MODE=fail
 run "$HELPER" claim
 assert_eq "$RC" 75
 assert_output_has 'CLAIM_UNKNOWN reason=readback_unavailable'
-assert_output_has 'gc bd show diagnostics:'
-assert_output_has 'mock read timeout'
+assert_stderr_has 'gc bd show diagnostics:'
+assert_stderr_has 'mock read timeout'
 assert_calls hook_calls 1
 assert_calls show_calls 3
 assert_lacks "$MOCK_LOG" 'current_calls'
@@ -450,12 +587,25 @@ for var in GC_ALIAS BEADS_ACTOR GC_AGENT GC_SESSION_NAME; do
   assert_lacks "$MOCK_LOG" 'hook_calls'
 done
 
-# Recovery failures never claim, mutate, or drain.
+# Recovery failures never claim, mutate, or drain. Only the SDK's "no current
+# claim" answer is no_current_assignment, the one case the prompt routes to a
+# fresh claim.
 reset_state
 run "$HELPER" recover
 assert_eq "$RC" 75
 assert_output_has 'CLAIM_UNKNOWN reason=no_current_assignment'
-assert_output_has 'no current bead'
+assert_stderr_has 'has no current claim'
+assert_lacks "$MOCK_LOG" 'hook_calls'
+assert_lacks "$MOCK_LOG" 'show_calls'
+assert_no_mutation
+
+reset_state
+set_current_claimed
+export MOCK_CURRENT_MODE=unavailable
+run "$HELPER" recover
+assert_eq "$RC" 75
+assert_output_has 'CLAIM_UNKNOWN reason=current_unavailable'
+assert_stderr_has 'mock session store read timed out'
 assert_lacks "$MOCK_LOG" 'hook_calls'
 assert_lacks "$MOCK_LOG" 'show_calls'
 assert_no_mutation
@@ -465,8 +615,8 @@ for pointer in '../x' 'a b' ' '; do
   printf '%s\n' "$pointer" >"$MOCK_CURRENT"
   run "$HELPER" recover
   assert_eq "$RC" 75
-  assert_output_has 'CLAIM_UNKNOWN reason=no_current_assignment'
-  assert_output_has 'gc hook current returned an invalid bead id'
+  assert_output_has 'CLAIM_UNKNOWN reason=invalid_current_pointer'
+  assert_stderr_has 'gc hook current returned an invalid bead id'
   assert_lacks "$MOCK_LOG" 'hook_calls'
   assert_lacks "$MOCK_LOG" 'show_calls'
   assert_no_mutation
@@ -494,6 +644,36 @@ done < <(grep -F 'assets/scripts/' "$PROMPT_TEMPLATE")
 while IFS= read -r line; do
   [[ "$line" == *'{{ printf "%x" .ConfigDir }}'* ]] || fail "raw ConfigDir interpolation: $line"
 done < <(grep -F '.ConfigDir' "$PROMPT_TEMPLATE")
+
+# Each command runs in a fresh shell, so every fenced block that uses $PACK_DIR
+# must invoke the decode partial before its first use.
+pack_dir_blocks=0
+in_block=0
+block_has_partial=0
+block_uses_pack_dir=0
+line_no=0
+while IFS= read -r line; do
+  line_no=$((line_no + 1))
+  if [[ "$line" == '```'* ]]; then
+    if ((in_block)); then
+      ((block_uses_pack_dir == 0)) || pack_dir_blocks=$((pack_dir_blocks + 1))
+      in_block=0
+    else
+      in_block=1 block_has_partial=0 block_uses_pack_dir=0
+    fi
+    continue
+  fi
+  ((in_block)) || continue
+  if [[ "$line" == *'{{ template "polecat-pack-dir" . }}'* ]]; then
+    block_has_partial=1
+  elif [[ "$line" == *'$PACK_DIR'* ]]; then
+    ((block_has_partial)) || fail "prompt line $line_no uses \$PACK_DIR before the polecat-pack-dir partial: $line"
+    block_uses_pack_dir=1
+  fi
+done <"$PROMPT_TEMPLATE"
+((in_block == 0)) || fail 'prompt template has an unterminated code fence'
+assert_eq "$pack_dir_blocks" "$(grep -cF '{{ template "polecat-pack-dir" . }}' "$PROMPT_TEMPLATE")"
+((pack_dir_blocks >= 4)) || fail "expected at least 4 \$PACK_DIR blocks, found $pack_dir_blocks"
 
 # Render the decode line with a hostile path, as Go's printf "%x" would, and run it.
 decode_line="$(grep -F 'printf -v PACK_DIR' "$PROMPT_TEMPLATE")"

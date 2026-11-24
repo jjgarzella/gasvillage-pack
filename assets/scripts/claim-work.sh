@@ -16,9 +16,6 @@
 # or reopens a bead, or acknowledges a drain while ownership is uncertain.
 #
 # Environment:
-#   GC_RIG         required; the rig store the bead is read back from
-#                  (`gc --rig "$GC_RIG" bd show`). The scoped read is the rig
-#                  membership check.
 #   GC_SESSION_ID  required; must equal the bead's gc.session_id, the session
 #                  back-reference the SDK stamps when it claims for a session.
 #   GC_BIN         optional gc binary override (tests).
@@ -29,26 +26,47 @@
 #                  result is available (recover, or claim-mode fallback), the
 #                  readback assignee must be one of these identities.
 #
-# Readback proof: exactly one record with the requested id, status
+# Readback: `gc bd show <id> --json`, deliberately not rig-scoped. The hook
+# federates its claim across the rig store and the city store and its result
+# does not name the store, so the SDK's id routing picks the store that owns
+# the bead. Ownership proof: exactly one record with the requested id, status
 # in_progress, gc.session_id == $GC_SESSION_ID, and the expected assignee.
 #
-# Hook drain reasons: no_work is a clean empty result (the helper then runs
-# `gc runtime drain-ack`); claims_errored means a claim may have happened, so
-# the current pointer is consulted; any other drain reason is an explicit
-# refusal of this session and is rejected without consulting the pointer.
-# Any work-action reason is accepted; the readback decides ownership.
+# Current-claim pointer failures: `gc hook current` exits 1 both when the
+# session has claimed nothing and when the lookup itself fails, so the helper
+# reads its diagnostic. no_current_assignment means the SDK reported that this
+# session has no current claim; current_unavailable is any other failure;
+# invalid_current_pointer is a pointer that is not a well-formed bead id. Only
+# no_current_assignment means "nothing claimed"; the others leave ownership
+# uncertain.
 #
-# Stdout markers and exit codes:
+# Hook drain reasons:
+#   no_work                     clean empty result; the drain is acknowledged.
+#   drain_pending, stale_session, missing_session_registration
+#                               the SDK told this session to stop without
+#                               claiming anything; the drain is acknowledged,
+#                               as the SDK contract requires.
+#   claims_errored              a claim may have happened; the current pointer
+#                               is consulted.
+#   non_turn_context, or any other reason
+#                               refusal that must not be acknowledged by this
+#                               caller; rejected without consulting the pointer.
+# Any work-action reason is accepted; the readback decides ownership.
+# Drains are acknowledged with `gc runtime drain-ack "$GC_SESSION_ID"`.
+#
+# Stdout carries only these markers, exactly one terminal marker per run:
 #   CLAIMED_BEAD_ID=<id>            exit 0   ownership verified; work on <id>.
 #   CLAIM_RECOVERED reason=<r>      (info)   printed before the readback when
 #                                            the bead came from the pointer.
 #   NO_ROUTED_WORK reason=no_work   exit 0   no work; drain acknowledged.
+#   SESSION_DRAINED reason=<r>      exit 0   hook told this session to stop;
+#                                            drain acknowledged.
 #   CLAIM_UNKNOWN reason=<r>        exit 75  ambiguous or unreadable result;
 #                                            preserve the bead and session.
 #   CLAIM_REJECTED reason=<r>       exit 76  hook refusal, or the readback
 #                                            does not prove ownership.
-#   usage error                     exit 64
-# CLI diagnostics from gc go to stderr.
+#   usage error                     exit 64  (no marker)
+# Diagnostics, including gc output, go to stderr.
 set -euo pipefail
 
 readonly EXIT_USAGE=64 EXIT_UNKNOWN=75 EXIT_REJECTED=76
@@ -72,9 +90,7 @@ rejected() {
 }
 
 GC_BIN="${GC_BIN:-gc}"
-GC_RIG="${GC_RIG:-}"
 GC_SESSION_ID="${GC_SESSION_ID:-}"
-[[ -n "$GC_RIG" ]] || rejected missing_rig
 [[ -n "$GC_SESSION_ID" ]] || rejected missing_session_id
 
 SESSION_IDENTITIES=()
@@ -93,19 +109,32 @@ report_diagnostics() {
   fi
 }
 
-# current_bead_id prints this session's current-claim bead id, or returns 1.
-current_bead_id() {
-  local output_file="$TMP_DIR/current.out" error_file="$TMP_DIR/current.err" bead_id
+# read_current_pointer sets CURRENT_ID to this session's current-claim bead id.
+# On failure it sets POINTER_FAILURE (see the header) and returns 1.
+read_current_pointer() {
+  local output_file="$TMP_DIR/current.out" error_file="$TMP_DIR/current.err"
+  CURRENT_ID=""
+  POINTER_FAILURE=""
   if ! "$GC_BIN" hook current --id-only >"$output_file" 2>"$error_file"; then
     report_diagnostics 'gc hook current' "$error_file"
+    if grep -Fq 'has no current claim' "$error_file"; then
+      POINTER_FAILURE=no_current_assignment
+    else
+      POINTER_FAILURE=current_unavailable
+    fi
     return 1
   fi
-  bead_id="$(sed -e 's/[[:space:]]*$//' "$output_file")"
-  if [[ ! "$bead_id" =~ $BEAD_ID_PATTERN ]]; then
+  CURRENT_ID="$(sed -e 's/[[:space:]]*$//' "$output_file")"
+  if [[ ! "$CURRENT_ID" =~ $BEAD_ID_PATTERN ]]; then
     printf 'gc hook current returned an invalid bead id\n' >&2
+    POINTER_FAILURE=invalid_current_pointer
     return 1
   fi
-  printf '%s' "$bead_id"
+}
+
+# ack_drain acknowledges this session's drain; gc's own output goes to stderr.
+ack_drain() {
+  "$GC_BIN" runtime drain-ack "$GC_SESSION_ID" >&2 || unknown drain_ack_failed
 }
 
 # is_session_identity VALUE succeeds when VALUE is one of this session's ids.
@@ -117,13 +146,13 @@ is_session_identity() {
   return 1
 }
 
-# verify_bead ID [EXACT_ASSIGNEE] reads ID back from the rig store and prints
+# verify_bead ID [EXACT_ASSIGNEE] reads ID back from its owning store and prints
 # CLAIMED_BEAD_ID only when the record proves this session owns it.
 verify_bead() {
   local bead_id="$1" exact_assignee="${2:-}" attempt read_ok=0 status assignee session_id
   local show_file="$TMP_DIR/show.json" error_file="$TMP_DIR/show.err"
   for ((attempt = 1; attempt <= READBACK_ATTEMPTS; attempt++)); do
-    if "$GC_BIN" --rig "$GC_RIG" bd show "$bead_id" --json >"$show_file" 2>"$error_file" \
+    if "$GC_BIN" bd show "$bead_id" --json >"$show_file" 2>"$error_file" \
       && jq -e . "$show_file" >/dev/null 2>&1; then
       read_ok=1
       break
@@ -153,9 +182,9 @@ verify_bead() {
 }
 
 if [[ "$MODE" == recover ]]; then
-  WORK_ID="$(current_bead_id)" || unknown no_current_assignment
+  read_current_pointer || unknown "$POINTER_FAILURE"
   printf 'CLAIM_RECOVERED reason=current_pointer\n'
-  verify_bead "$WORK_ID"
+  verify_bead "$CURRENT_ID"
   exit 0
 fi
 
@@ -173,8 +202,18 @@ hook_result_is() {
 }
 
 if hook_result_is '.action == "drain" and .reason == "no_work"'; then
-  "$GC_BIN" runtime drain-ack || unknown drain_ack_failed
+  ack_drain
   printf 'NO_ROUTED_WORK reason=no_work\n'
+  exit 0
+fi
+
+if hook_result_is '.action == "drain"
+  and (.reason == "drain_pending" or .reason == "stale_session"
+       or .reason == "missing_session_registration")'; then
+  report_diagnostics 'gc hook' "$HOOK_ERR"
+  DRAIN_REASON="$(jq -r '.reason' "$HOOK_OUT")"
+  ack_drain
+  printf 'SESSION_DRAINED reason=%s\n' "$DRAIN_REASON"
   exit 0
 fi
 
@@ -207,6 +246,6 @@ else
   RECOVERY_REASON=malformed_result
 fi
 report_diagnostics 'gc hook' "$HOOK_ERR"
-WORK_ID="$(current_bead_id)" || unknown "${RECOVERY_REASON}_no_current_assignment"
+read_current_pointer || unknown "${RECOVERY_REASON}_${POINTER_FAILURE}"
 printf 'CLAIM_RECOVERED reason=%s\n' "$RECOVERY_REASON"
-verify_bead "$WORK_ID"
+verify_bead "$CURRENT_ID"

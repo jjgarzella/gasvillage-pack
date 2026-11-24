@@ -159,15 +159,18 @@ Polecat sessions use `assets/scripts/claim-work.sh claim` for one atomic
 yields, keep polling that same execution handle until it exits. If the process
 finished but its result was lost, run `assets/scripts/claim-work.sh recover`
 in the same session; recovery reads only `gc hook current --id-only`. Both
-modes read the bead back from the `$GC_RIG` store and require `in_progress`,
+modes read the bead back with id-routed `gc bd show <id> --json` (the hook can
+claim from the rig store or the city store) and require `in_progress`,
 `gc.session_id` equal to `$GC_SESSION_ID`, and the assignee the hook reported
 (or, during recovery, one of the session's own identities). The helper never
 makes another atomic claim, releases a bead, or drains after an unreadable
-response. Explicit hook refusals such as stale sessions, non-turn contexts,
-pending drains, and missing session registration stop without consulting an
-older session pointer. Exit codes: 0 for `CLAIMED_BEAD_ID` or
-`NO_ROUTED_WORK`, 75 for `CLAIM_UNKNOWN`, 76 for `CLAIM_REJECTED`, 64 for
-usage; the script header documents every marker and input. See
+response. Hook drains never consult an older session pointer: pending drains,
+stale sessions, and missing session registration are acknowledged as the SDK
+requires (`SESSION_DRAINED`); a non-turn-context or unknown refusal is
+rejected without acknowledgment. Exit codes: 0 for `CLAIMED_BEAD_ID`,
+`NO_ROUTED_WORK`, or `SESSION_DRAINED`, 75 for `CLAIM_UNKNOWN`, 76 for
+`CLAIM_REJECTED`, 64 for usage; the script header documents every marker and
+input. See
 [Claim recovery rollout](docs/claim-recovery-rollout.md) for operator rollout,
 the preserve-and-report behavior change, and rollback steps.
 
