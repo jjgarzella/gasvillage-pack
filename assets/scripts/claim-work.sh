@@ -29,6 +29,13 @@ rejected() {
   exit 76
 }
 
+report_hook_diagnostics() {
+  if [ -s "$HOOK_ERR" ]; then
+    printf 'gc hook diagnostics:\n' >&2
+    cat "$HOOK_ERR" >&2
+  fi
+}
+
 current_bead_id() {
   local output_file="$TMP_DIR/current.out" error_file="$TMP_DIR/current.err" bead_id
   if ! "$GC_BIN" hook current --id-only >"$output_file" 2>"$error_file"; then
@@ -144,6 +151,7 @@ else
   else
     RECOVERY_REASON=malformed_result
   fi
+  report_hook_diagnostics
   if ! WORK_ID="$(current_bead_id)"; then
     unknown "${RECOVERY_REASON}_no_current_assignment"
   fi

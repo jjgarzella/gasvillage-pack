@@ -169,6 +169,33 @@ expect_rejected() {
 [[ -x "$HELPER" ]] || fail "missing executable helper: $HELPER"
 
 reset_state
+set +e
+output="$(env -u GC_RIG "$HELPER" claim 2>&1)"
+rc=$?
+set -e
+assert_eq "$rc" 76
+assert_has <(printf '%s\n' "$output") 'CLAIM_REJECTED reason=missing_rig'
+assert_lacks "$MOCK_LOG" 'hook_calls'
+
+reset_state
+set +e
+output="$(env -u GC_SESSION_ID "$HELPER" claim 2>&1)"
+rc=$?
+set -e
+assert_eq "$rc" 76
+assert_has <(printf '%s\n' "$output") 'CLAIM_REJECTED reason=missing_session_id'
+assert_lacks "$MOCK_LOG" 'hook_calls'
+
+reset_state
+set +e
+output="$(env -u BEADS_ACTOR -u GC_SESSION_NAME -u GC_AGENT "$HELPER" claim 2>&1)"
+rc=$?
+set -e
+assert_eq "$rc" 76
+assert_has <(printf '%s\n' "$output") 'CLAIM_REJECTED reason=missing_assignee_identity'
+assert_lacks "$MOCK_LOG" 'hook_calls'
+
+reset_state
 output="$("$HELPER" claim)"
 assert_has <(printf '%s\n' "$output") 'CLAIMED_BEAD_ID=fx-1'
 assert_eq "$(grep -c '^hook_calls$' "$MOCK_LOG")" 1
@@ -257,6 +284,7 @@ rc=$?
 set -e
 assert_eq "$rc" 75
 assert_has <(printf '%s\n' "$output") 'CLAIM_UNKNOWN reason=hook_timeout_no_current_assignment'
+assert_has <(printf '%s\n' "$output") 'mock hook timed out'
 assert_eq "$(grep -c '^hook_calls$' "$MOCK_LOG")" 1
 assert_eq "$(grep -c '^current_calls$' "$MOCK_LOG")" 1
 assert_lacks "$MOCK_LOG" 'drain_ack'
