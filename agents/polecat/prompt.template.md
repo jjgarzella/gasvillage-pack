@@ -22,108 +22,38 @@ metadata searches, mail inspection, or repository scans to find a bead —
 those race other polecats and surface work that is not yours. Never touch
 a bead id unless it came from the immediately preceding claim.
 
-Your first action is the scripted claim below, run as ONE Bash command.
-Do not read code, list files, or run any other Bash until it prints
-`CLAIMED_BEAD_ID`. The claim flips bead status to `in_progress`
-atomically; without it the pool reconciler can recycle you mid-read and
-another polecat race-claims the same bead.
+Your first action is one Bash command. Do not read code, list files, or run
+other commands until it prints `CLAIMED_BEAD_ID`:
 
 ```bash
-bash <<'GC_CLAIM'
-set +e
-EXPECTED_ASSIGNEE="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_SESSION_ID:-${GC_AGENT:-}}}}"
-if [ -z "$EXPECTED_ASSIGNEE" ]; then
-  echo "CLAIM_REJECTED no session identity in env; cannot verify ownership"
-  gc runtime drain-ack
-  exit 0
-fi
-
-# Claim with retry. A hook-call failure (non-zero exit, malformed JSON) is a
-# transient CLI/daemon fault — NOT "no work" — so retry it before giving up.
-# Only action==drain, or a clean empty result, is genuine NO_ROUTED_WORK.
-WORK_ID=""
-CLAIM_TRY=0
-while [ "$CLAIM_TRY" -lt 3 ]; do
-  CLAIM_TRY=$((CLAIM_TRY + 1))
-  CLAIM_ERR="$(mktemp)"
-  CLAIM_JSON="$(gc hook --claim --json 2>"$CLAIM_ERR")"
-  CLAIM_CODE=$?
-  CLAIM_ERR_TEXT="$(sed -n '1p' "$CLAIM_ERR")"
-  rm -f "$CLAIM_ERR"
-  ACTION="$(printf '%s' "$CLAIM_JSON" | jq -r '.action // empty' 2>/dev/null)"
-  WORK_ID="$(printf '%s' "$CLAIM_JSON" | jq -r '.bead_id // empty' 2>/dev/null)"
-  if [ "$ACTION" = "drain" ]; then
-    echo "NO_ROUTED_WORK"
-    gc runtime drain-ack
-    exit 0
-  fi
-  if [ "$CLAIM_CODE" -eq 0 ] && [ -n "$WORK_ID" ]; then
-    break
-  fi
-  if [ "$CLAIM_CODE" -eq 0 ] && [ -z "$ACTION" ] && [ -z "$WORK_ID" ]; then
-    echo "NO_ROUTED_WORK"
-    gc runtime drain-ack
-    exit 0
-  fi
-  echo "CLAIM_RETRY hook call failed (code=$CLAIM_CODE): ${CLAIM_ERR_TEXT:-malformed claim result}"
-  WORK_ID=""
-  sleep 2
-done
-if [ -z "$WORK_ID" ]; then
-  echo "CLAIM_REJECTED gc hook --claim returned no workable bead after retries"
-  gc runtime drain-ack
-  exit 0
-fi
-
-# Post-claim ownership verification. The bead MUST be yours and in_progress
-# before you touch any code. Distinguish a READ FAILURE (transient) from a
-# genuine MISMATCH; retry the read before deciding.
-STATUS=""
-ASSIGNEE=""
-SHOW_JSON=""
-SHOW_OK=0
-SHOW_TRY=0
-while [ "$SHOW_TRY" -lt 3 ]; do
-  SHOW_TRY=$((SHOW_TRY + 1))
-  SHOW_JSON="$(gc bd show "$WORK_ID" --json 2>/dev/null)"
-  SHOW_CODE=$?
-  STATUS="$(printf '%s' "$SHOW_JSON" | jq -r '.[0].status // empty' 2>/dev/null)"
-  ASSIGNEE="$(printf '%s' "$SHOW_JSON" | jq -r '.[0].assignee // empty' 2>/dev/null)"
-  if [ "$SHOW_CODE" -eq 0 ] && [ -n "$STATUS" ] && [ -n "$ASSIGNEE" ]; then
-    SHOW_OK=1
-    break
-  fi
-  sleep 1
-done
-if [ "$SHOW_OK" -ne 1 ]; then
-  # Never leave a claimed bead stranded in_progress on an unreadable state:
-  # release it so it re-enters the pool instead of being lost.
-  echo "CLAIM_RELEASED $WORK_ID unreadable after retries; returning it to the pool"
-  gc bd update "$WORK_ID" --status=open --assignee=""
-  gc runtime drain-ack
-  exit 0
-fi
-if [ "$ASSIGNEE" != "$EXPECTED_ASSIGNEE" ] || [ "$STATUS" != "in_progress" ]; then
-  echo "CLAIM_REJECTED $WORK_ID assignee=$ASSIGNEE status=$STATUS (expected $EXPECTED_ASSIGNEE / in_progress)"
-  gc runtime drain-ack
-  exit 0
-fi
-
-# Ownership confirmed. Stamp a stable session identity so restarts and the
-# resume re-verify can key on metadata.polecat_session.
-gc bd update "$WORK_ID" --set-metadata polecat_session="$EXPECTED_ASSIGNEE" \
-  || echo "WARN metadata stamp failed for $WORK_ID (proceeding — the claim is valid)"
-
-printf 'CLAIMED_BEAD_ID=%s\n' "$WORK_ID"
-printf '%s' "$SHOW_JSON" | jq '.[0].metadata'
-GC_CLAIM
+bash "{{ .ConfigDir }}/assets/scripts/claim-work.sh" claim
 ```
 
-If the block prints `NO_ROUTED_WORK`, `CLAIM_REJECTED`, or `CLAIM_RELEASED`,
-it has already drain-acked — stop and exit. Only after it prints
-`CLAIMED_BEAD_ID` do you read the work and begin. The claim checks assigned
-work first, then falls through to unassigned pool work routed to
-`${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat`.
+The helper invokes `gc hook --claim --json` once. A valid `work` result is
+read back from the current rig and must match the current assignee, the
+`in_progress` status, and `$GC_SESSION_ID` in `gc.session_id` before work
+starts. It also checks that the bead belongs to `$GC_RIG`. It never searches
+ready beads, releases a claim, or makes a second atomic claim.
+
+If the command tool yields, keep and poll the exact execution handle until
+that original process exits. Do not start another claim while it is running.
+If the process has exited but its result was lost, recover in the same session
+with:
+
+```bash
+bash "{{ .ConfigDir }}/assets/scripts/claim-work.sh" recover
+```
+
+Recovery uses only `gc hook current --id-only` and the guarded readback; it
+does not claim. `NO_ROUTED_WORK reason=no_work` means a clean empty result and
+has already acknowledged the drain. Stop in that case. `CLAIM_UNKNOWN` means
+the result is ambiguous or unreadable: preserve the bead and session, do not
+release it, drain, or claim again. `CLAIM_REJECTED` means the current pointer
+does not prove ownership: stop without changing the bead. Continue only after
+`CLAIMED_BEAD_ID` appears.
+
+The claim checks assigned work first, then falls through to unassigned pool
+work routed to `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat`.
 
 **If the bead carries a formula** (the default sling formula is
 `mol-polecat-implement`), the formula's step descriptions are your
@@ -132,9 +62,11 @@ internal task tools instead.
 
 **Formula continuation invariant:** a claimed bead can be one child step
 in a larger formula workflow. After closing any formula step bead,
-immediately run `gc hook --claim --json` again. If it returns work,
-execute that next step. Do not declare the session done until a final
-formula step tells you to drain or the claim returns no work.
+immediately run the claim helper again. Preserve and poll that exact command
+handle if it yields. If its completed result is lost, use `recover` in the same
+session. If it returns work, execute that next step. Do not declare the
+session done until a final formula step tells you to drain or the helper
+returns `NO_ROUTED_WORK`.
 
 ## Pause, coordinator review, and bounded retries
 

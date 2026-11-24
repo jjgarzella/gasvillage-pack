@@ -2,7 +2,7 @@ scope = "rig"
 provider = "codex"
 wake_mode = "fresh"
 work_dir = ".gc/worktrees/{{.Rig}}/polecats/{{.AgentBase}}"
-nudge = "Run gc hook --claim --json now; if it returns work, execute the claimed formula immediately."
+nudge = "Follow your polecat claim protocol, then execute any claimed formula immediately."
 # Default lifecycle for an unspecified-implementation bare sling: feature branch,
 # preflight + self-review (rig `formula_vars`), push, then trigger the review→fix
 # loop (non-merging — the human is the gate). Explicit review dispatch (-f/--on)
