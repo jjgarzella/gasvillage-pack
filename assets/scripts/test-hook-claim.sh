@@ -55,6 +55,10 @@ if [[ "${1:-}" == hook && "${2:-}" == --claim ]]; then
       printf '{"schema_version":"1","ok":true,"command":"hook","action":"drain","reason":"claims_errored"}\n'
       exit 0
       ;;
+    stale_session|non_turn_context|drain_pending|missing_session_registration)
+      printf '{"schema_version":"1","ok":true,"command":"hook","action":"drain","reason":"%s"}\n' "${MOCK_HOOK_MODE}"
+      exit 0
+      ;;
     malformed_no_claim)
       printf '{broken'
       exit 0
@@ -218,6 +222,27 @@ set -e
 assert_eq "$rc" 75
 assert_has <(printf '%s\n' "$output") 'CLAIM_UNKNOWN reason=claim_error_no_current_assignment'
 assert_lacks "$MOCK_LOG" 'drain_ack'
+
+for reason in stale_session non_turn_context drain_pending missing_session_registration; do
+  reset_state
+  export MOCK_HOOK_MODE="$reason"
+  jq '.[0].status="in_progress"
+      | .[0].assignee="worker"
+      | .[0].metadata={"gc.root_store_ref":"rig:research","gc.session_id":"session-a","gc.claimed_at":"2026-11-24T14:00:00Z"}' \
+    "$MOCK_STATE" >"$MOCK_STATE.tmp"
+  mv "$MOCK_STATE.tmp" "$MOCK_STATE"
+  printf 'fx-1\n' >"$MOCK_CURRENT"
+  set +e
+  output="$("$HELPER" claim 2>&1)"
+  rc=$?
+  set -e
+  assert_eq "$rc" 76
+  assert_has <(printf '%s\n' "$output") "CLAIM_REJECTED reason=$reason"
+  assert_eq "$(grep -c '^hook_calls$' "$MOCK_LOG")" 1
+  assert_lacks "$MOCK_LOG" 'current_calls'
+  assert_lacks "$MOCK_LOG" 'show_calls'
+  assert_lacks "$MOCK_LOG" 'drain_ack'
+done
 
 for mode in malformed_no_claim empty_no_claim; do
   reset_state

@@ -161,8 +161,10 @@ finished but its result was lost, run `assets/scripts/claim-work.sh recover`
 in the same session; recovery reads only `gc hook current --id-only` and
 verifies the bead's rig, assignee, status, session id, and claim timestamp.
 It never makes another atomic claim or releases a bead after an unreadable
-response. See [Claim recovery rollout](docs/claim-recovery-rollout.md) for
-operator rollout and rollback steps.
+response. Explicit hook refusals such as stale sessions, non-turn contexts,
+pending drains, and missing session registration stop without consulting an
+older session pointer. See [Claim recovery rollout](docs/claim-recovery-rollout.md)
+for operator rollout and rollback steps.
 
 Run the disposable fake-CLI checks with:
 

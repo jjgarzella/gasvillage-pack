@@ -49,8 +49,8 @@ does not claim. `NO_ROUTED_WORK reason=no_work` means a clean empty result and
 has already acknowledged the drain. Stop in that case. `CLAIM_UNKNOWN` means
 the result is ambiguous or unreadable: preserve the bead and session, do not
 release it, drain, or claim again. `CLAIM_REJECTED` means the current pointer
-does not prove ownership: stop without changing the bead. Continue only after
-`CLAIMED_BEAD_ID` appears.
+does not prove ownership, or the hook explicitly refused the session: stop
+without changing the bead. Continue only after `CLAIMED_BEAD_ID` appears.
 
 The claim checks assigned work first, then falls through to unassigned pool
 work routed to `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat`.

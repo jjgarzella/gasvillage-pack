@@ -104,6 +104,20 @@ if [[ "$HOOK_CODE" -eq 0 ]] && jq -e '
   exit 0
 fi
 
+if [[ "$HOOK_CODE" -eq 0 ]] && jq -e '
+  type == "object"
+  and .schema_version == "1"
+  and .ok == true
+  and .command == "hook"
+  and .action == "drain"
+  and (.reason | type == "string")
+  and .reason != "no_work"
+  and .reason != "claims_errored"
+' "$HOOK_OUT" >/dev/null 2>&1; then
+  HOOK_REASON="$(jq -r '.reason' "$HOOK_OUT")"
+  rejected "$HOOK_REASON"
+fi
+
 WORK_ID=""
 RECOVERY_REASON=""
 if [[ "$HOOK_CODE" -eq 0 ]] && jq -e '
