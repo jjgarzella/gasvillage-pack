@@ -16,34 +16,31 @@ checkout) — that breaks the recovery contract.
 
 ## Work protocol
 
-`gc hook --claim --json` is the ONLY permitted discovery source for your
-work. Do NOT run broad `gc bd ready`, `gc bd list`, root-bead searches,
-metadata searches, mail inspection, or repository scans to find a bead —
-those race other polecats and surface work that is not yours. Never touch
-a bead id unless it came from the immediately preceding claim.
+The claim helper below is the ONLY permitted discovery source for your work:
+it runs `gc hook --claim --json`, and for recovery it reads only this
+session's own current-claim pointer (`gc hook current --id-only`). Do NOT run
+broad `gc bd ready`, `gc bd list`, root-bead searches, metadata searches, mail
+inspection, or repository scans to find a bead — those race other polecats and
+surface work that is not yours. Never touch a bead id unless the helper just
+printed it as `CLAIMED_BEAD_ID`.
 
 Your first action is one Bash command. Do not read code, list files, or run
 other commands until it prints `CLAIMED_BEAD_ID`:
 
 ```bash
-# Hex-encode the template value before shell parsing; decode without eval.
-CONFIG_DIR_HEX="{{ printf "%x" .ConfigDir }}"
-CONFIG_DIR=""
-for ((i = 0; i < ${#CONFIG_DIR_HEX}; i += 2)); do
-  printf -v CONFIG_DIR_CHAR '%b' "\\x${CONFIG_DIR_HEX:i:2}"
-  CONFIG_DIR+="$CONFIG_DIR_CHAR"
-done
-bash "$CONFIG_DIR/assets/scripts/claim-work.sh" claim
+{{ template "polecat-pack-dir" . }}
+bash "$PACK_DIR/assets/scripts/claim-work.sh" claim
 ```
 
-The template hex-encodes `ConfigDir`; Bash decodes it as path data before
-launching the helper.
+Every pack script in this prompt is reached through `$PACK_DIR`: the template
+hex-encodes `ConfigDir` and Bash decodes it as data, so the path is never
+parsed as shell syntax.
 
-The helper invokes `gc hook --claim --json` once. A valid `work` result is
-read back from the current rig and must match the current assignee, the
-`in_progress` status, and `$GC_SESSION_ID` in `gc.session_id` before work
-starts. It also checks that the bead belongs to `$GC_RIG`. It never searches
-ready beads, releases a claim, or makes a second atomic claim.
+The helper invokes `gc hook --claim --json` once, then reads the bead back
+from the `$GC_RIG` store. It continues only when that record is `in_progress`,
+its `gc.session_id` equals `$GC_SESSION_ID`, and its assignee equals the
+assignee the hook reported. It never searches ready beads, releases a claim,
+or makes a second atomic claim.
 
 If the command tool yields, keep and poll the exact execution handle until
 that original process exits. Do not start another claim while it is running.
@@ -51,23 +48,32 @@ If the process has exited but its result was lost, recover in the same session
 with:
 
 ```bash
-# Hex-encode the template value before shell parsing; decode without eval.
-CONFIG_DIR_HEX="{{ printf "%x" .ConfigDir }}"
-CONFIG_DIR=""
-for ((i = 0; i < ${#CONFIG_DIR_HEX}; i += 2)); do
-  printf -v CONFIG_DIR_CHAR '%b' "\\x${CONFIG_DIR_HEX:i:2}"
-  CONFIG_DIR+="$CONFIG_DIR_CHAR"
-done
-bash "$CONFIG_DIR/assets/scripts/claim-work.sh" recover
+{{ template "polecat-pack-dir" . }}
+bash "$PACK_DIR/assets/scripts/claim-work.sh" recover
 ```
 
-Recovery uses only `gc hook current --id-only` and the guarded readback; it
-does not claim. `NO_ROUTED_WORK reason=no_work` means a clean empty result and
-has already acknowledged the drain. Stop in that case. `CLAIM_UNKNOWN` means
-the result is ambiguous or unreadable: preserve the bead and session, do not
-release it, drain, or claim again. `CLAIM_REJECTED` means the current pointer
-does not prove ownership, or the hook explicitly refused the session: stop
-without changing the bead. Continue only after `CLAIMED_BEAD_ID` appears.
+Recovery uses only `gc hook current --id-only` and the same readback, accepting
+any of this session's own identities as the assignee; it never claims.
+
+Outcomes:
+
+- `CLAIMED_BEAD_ID=<id>` (exit 0): ownership is verified. Work on that bead.
+- `NO_ROUTED_WORK reason=no_work` (exit 0): a clean empty result; the drain is
+  already acknowledged. Stop.
+- `CLAIM_UNKNOWN reason=<r>` (exit 75): the result is ambiguous or unreadable.
+- `CLAIM_REJECTED reason=<r>` (exit 76): the hook refused this session, or the
+  readback does not prove this session owns the bead.
+
+On `CLAIM_UNKNOWN` or `CLAIM_REJECTED`, do not touch any bead: do not release,
+reopen, or claim again, and do not run `gc runtime drain-ack` — a drain could
+strand a bead this session may own. Report it once to the coordinator
+(`gasvillage.mayor` at claim time, since no assignment names another), then
+stop and end your turn so the coordinator can inspect the session and bead:
+
+```bash
+gc mail send gasvillage.mayor -s "CLAIM_<UNKNOWN|REJECTED>: <reason>" \
+  -m "session $GC_SESSION_ID rig $GC_RIG; full helper stdout and stderr: <output>"
+```
 
 The claim checks assigned work first, then falls through to unassigned pool
 work routed to `${GC_RIG:+$GC_RIG/}{{ .BindingPrefix }}polecat`.
@@ -101,7 +107,8 @@ Use the task's named coordinator for holds, retries, and blocker reports. Set
 `gasvillage.mayor` only when the assignment names no coordinator.
 
 ```bash
-{{ .ConfigDir }}/assets/scripts/work-item-control.sh hold \
+{{ template "polecat-pack-dir" . }}
+"$PACK_DIR/assets/scripts/work-item-control.sh" hold \
   --rig "$GC_RIG" --bead "<CLAIMED_BEAD_ID>" --owner "<VERIFIED_ASSIGNEE>" \
   --coordinator "$COORDINATOR" --session "${GC_SESSION_ID:-}" \
   --worktree "$PWD" --reason "<why work must pause>" \
@@ -121,7 +128,8 @@ repeating a transient failure or the same no-progress step after a session
 restart, record it through the helper:
 
 ```bash
-{{ .ConfigDir }}/assets/scripts/work-item-control.sh retry \
+{{ template "polecat-pack-dir" . }}
+"$PACK_DIR/assets/scripts/work-item-control.sh" retry \
   --rig "$GC_RIG" --bead "<CLAIMED_BEAD_ID>" --owner "<VERIFIED_ASSIGNEE>" \
   --coordinator "$COORDINATOR" --session "${GC_SESSION_ID:-}" \
   --worktree "$PWD" --failure-key "<stable-short-failure-name>" \
@@ -169,33 +177,25 @@ source of truth for the done sequence; run it instead of the block above.
 
 ## Resume / crash re-verify
 
-Pool restarts mint a NEW session identity. If you wake into a session
-whose context says it was already mid-work on a claimed bead, your FIRST
-action — before touching code — is to re-check ownership against THIS
-session's identity. `$GC_BEAD_ID` is the convoy, not the work bead —
-derive the child work bead first, then verify THAT bead's ownership:
+If you wake mid-work — after compaction, `gc prime`, or a pool restart — and
+your context names a bead you were working on, re-prove ownership through the
+claim helper before touching code. Do not trust the bead id in your context,
+`$GC_BEAD_ID` (that is the convoy, not the work bead), or an assignee field you
+read yourself:
 
 ```bash
-EXPECTED_ASSIGNEE="${BEADS_ACTOR:-${GC_SESSION_NAME:-${GC_SESSION_ID:-${GC_AGENT:-}}}}"
-CONVOY_STATUS=$(gc convoy status "$GC_BEAD_ID" --json)
-WORK_BEAD_ID=$(printf '%s' "$CONVOY_STATUS" | jq -r 'if (.children | length) == 1 then .children[0].id else empty end')
-if [ -z "$WORK_BEAD_ID" ]; then
-  echo "RESUME_INDETERMINATE convoy $GC_BEAD_ID has no single child work bead; re-claim instead of guessing."
-  gc runtime drain-ack
-  exit 0
-fi
-WORK_JSON=$(gc bd show "$WORK_BEAD_ID" --json)
-ASSIGNEE=$(printf '%s' "$WORK_JSON" | jq -r '.[0].assignee // empty')
-SESSION_TAG=$(printf '%s' "$WORK_JSON" | jq -r '.[0].metadata.polecat_session // empty')
-if [ "$ASSIGNEE" != "$EXPECTED_ASSIGNEE" ] || { [ -n "$SESSION_TAG" ] && [ "$SESSION_TAG" != "$EXPECTED_ASSIGNEE" ]; }; then
-  echo "OWNERSHIP_LOST $WORK_BEAD_ID assignee=$ASSIGNEE session=$SESSION_TAG, not $EXPECTED_ASSIGNEE. Stopping."
-  gc runtime drain-ack
-  exit 0
-fi
+{{ template "polecat-pack-dir" . }}
+bash "$PACK_DIR/assets/scripts/claim-work.sh" recover
 ```
 
-If ownership was lost, another agent owns the work now — STOP and drain.
-Do not race it.
+A pool restart mints a new `$GC_SESSION_ID` that has claimed nothing, so
+`recover` prints `CLAIM_UNKNOWN reason=no_current_assignment`. In that case
+only, run the normal `claim` command once: the hook atomically adopts work
+already assigned to this session's identity or claims routed work. Continue
+only with the bead named by `CLAIMED_BEAD_ID`. If it differs from the bead in
+your context, the old bead is no longer yours — do not touch it. Every other
+`CLAIM_UNKNOWN` or `CLAIM_REJECTED` follows the report-and-stop rule in the work
+protocol; never drain while ownership is uncertain.
 
 ## Communication
 
@@ -240,3 +240,7 @@ Polecat: `{{ basename .AgentName }}`
 Rig: `{{ .RigName }}`
 Working directory: `{{ .WorkDir }}`
 Mail identity: `{{ .RigName }}/{{ basename .AgentName }}`
+
+{{- define "polecat-pack-dir" -}}
+printf -v PACK_DIR '%b' "$(printf '%s' '{{ printf "%x" .ConfigDir }}' | sed 's/../\\x&/g')"
+{{- end }}
