@@ -17,7 +17,7 @@ checkout) — that breaks the recovery contract.
 ## Work protocol
 
 The claim helper below is the ONLY permitted discovery source for your work:
-it runs `gc hook --claim --json`, and for recovery it reads only this
+it runs `gc hook --claim --drain-ack --json`, and for recovery it reads only this
 session's own current-claim pointer (`gc hook current --id-only`). Do NOT run
 broad `gc bd ready`, `gc bd list`, root-bead searches, metadata searches, mail
 inspection, or repository scans to find a bead — those race other polecats and
@@ -36,7 +36,7 @@ Every pack script in this prompt is reached through `$PACK_DIR`: the template
 hex-encodes `ConfigDir` and Bash decodes it as data, so the path is never
 parsed as shell syntax.
 
-The helper invokes `gc hook --claim --json` once, then reads the bead back
+The helper invokes `gc hook --claim --drain-ack --json` once, then reads the bead back
 with `gc bd show <id>`, which routes the id to whichever store (rig or city)
 the hook claimed it from. It continues only when that record is
 `in_progress`, its `gc.session_id` equals `$GC_SESSION_ID`, and its assignee
@@ -59,15 +59,16 @@ any of this session's own identities as the assignee; it never claims.
 Outcomes:
 
 - `CLAIMED_BEAD_ID=<id>` (exit 0): ownership is verified. Work on that bead.
-- `NO_ROUTED_WORK reason=no_work` (exit 0): a clean empty result; the drain is
-  already acknowledged. Stop.
-- `SESSION_DRAINED reason=<r>` (exit 0): the hook told this session to stop
-  (`drain_pending`, `stale_session`, or `missing_session_registration`) without
-  claiming anything; the drain is already acknowledged. Stop.
-- `CLAIM_UNKNOWN reason=<r>` (exit 75): the result is ambiguous or unreadable.
+- `SESSION_DRAINED reason=<r>` (exit 0): the hook claimed nothing and the SDK
+  already acknowledged the drain (`no_work`, `claims_errored`, `drain_pending`,
+  `stale_session`, ...). Stop.
+- `CLAIM_UNKNOWN reason=<r>` (exit 75): ownership is unproven — the result was
+  lost or unreadable, or the SDK could not acknowledge its drain.
 - `CLAIM_REJECTED reason=<r>` (exit 76): the hook refused this session in a way
   this turn must not acknowledge (such as `non_turn_context`), or the readback
-  does not prove this session owns the bead.
+  disproves that this session owns the bead.
+
+The header of `claim-work.sh` lists every reason token.
 
 On `CLAIM_UNKNOWN` or `CLAIM_REJECTED`, do not touch any bead: do not release,
 reopen, or claim again, and do not run `gc runtime drain-ack` — a drain could
@@ -94,7 +95,7 @@ immediately run the claim helper again. Preserve and poll that exact command
 handle if it yields. If its completed result is lost, use `recover` in the same
 session. If it returns work, execute that next step. Do not declare the
 session done until a final formula step tells you to drain or the helper
-returns `NO_ROUTED_WORK` or `SESSION_DRAINED`.
+returns `SESSION_DRAINED`.
 
 ## Pause, coordinator review, and bounded retries
 
@@ -195,10 +196,12 @@ bash "$PACK_DIR/assets/scripts/claim-work.sh" recover
 
 A pool restart mints a new `$GC_SESSION_ID` that has claimed nothing, so
 `recover` prints `CLAIM_UNKNOWN reason=no_current_assignment` — the SDK
-answered that this session has no current claim. In that case only, run the
-normal `claim` command once. `current_unavailable` (the lookup failed) and
-`invalid_current_pointer` are not that case: ownership is uncertain, so report
-and stop. On the `claim` run: the hook atomically adopts work
+answered that this session has no current claim. `recover` prints
+`CLAIM_UNKNOWN reason=pointer_closed` when this session's most recent claim is
+already closed (a finished formula step). In those two cases only, run the
+normal `claim` command once. `current_unavailable` (the lookup failed),
+`invalid_current_pointer`, and every claim-mode `CLAIM_UNKNOWN` are not those
+cases: ownership is uncertain, so report and stop. On the `claim` run: the hook atomically adopts work
 already assigned to this session's identity or claims routed work. Continue
 only with the bead named by `CLAIMED_BEAD_ID`. If it differs from the bead in
 your context, the old bead is no longer yours — do not touch it. Every other

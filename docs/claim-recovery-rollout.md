@@ -2,10 +2,10 @@
 
 This change updates the polecat prompt and its claim helper; no bead migration
 is required. Syncing the pack leaves existing bead records untouched. New
-sessions use the normal atomic claim flow. A clean empty result, and a hook
-drain that tells the session to stop (`drain_pending`, `stale_session`,
-`missing_session_registration`), are followed by the normal drain
-acknowledgment. Review and merge the pack change through
+sessions use the normal atomic claim flow with `--drain-ack`, so every hook
+drain that claimed nothing (`no_work`, `claims_errored`, `drain_pending`,
+`stale_session`, `missing_session_registration`) is acknowledged by the SDK
+itself, exactly as for any other `--drain-ack` caller. Review and merge the pack change through
 the repository's normal human gate before deploying it.
 
 ## Behavior change: preserve and report instead of release
@@ -51,9 +51,10 @@ normal coordinator flow. The pack never does this automatically.
    `GC_SESSION_NAME`). On `CLAIM_UNKNOWN` or
    `CLAIM_REJECTED`, leave the bead and session unchanged and follow the
    report-and-stop handling above. Only `CLAIM_UNKNOWN
-   reason=no_current_assignment` means the SDK reported no current claim;
-   `current_unavailable` and `invalid_current_pointer` leave ownership
-   uncertain.
+   reason=no_current_assignment` (the SDK reported no current claim) and
+   `CLAIM_UNKNOWN reason=pointer_closed` (the session's most recent claim is
+   closed) mean the session holds nothing; `current_unavailable` and
+   `invalid_current_pointer` leave ownership uncertain.
 5. Do not issue a second `gc hook --claim`, search `bd ready`, clear an
    assignee, reopen a bead, or acknowledge a drain while the claim result is
    unknown. The current-session pointer is the only recovery source.
