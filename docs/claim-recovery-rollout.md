@@ -2,11 +2,16 @@
 
 This change updates the polecat prompt and its claim helper; no bead migration
 is required. Syncing the pack leaves existing bead records untouched. New
-sessions use the normal atomic claim flow with `--drain-ack`, so every hook
-drain that claimed nothing (`no_work`, `claims_errored`, `drain_pending`,
-`stale_session`, `missing_session_registration`) is acknowledged by the SDK
-itself, exactly as for any other `--drain-ack` caller. Review and merge the pack change through
-the repository's normal human gate before deploying it.
+sessions use the normal atomic claim flow with `--drain-ack`, so a hook drain
+that claimed nothing is acknowledged by the SDK itself whenever the SDK is
+allowed to acknowledge it, exactly as for any other `--drain-ack` caller (for
+example `no_work` or `claims_errored`; the helper header lists the reasons).
+Two drain outcomes are not acknowledged: a refusal a turn must not acknowledge
+(such as `non_turn_context`) is reported as `CLAIM_REJECTED`, and a failed
+acknowledgment as `CLAIM_UNKNOWN reason=drain_ack_failed`. Both stop the
+session without a drain and are left for the coordinator, as described below.
+Review and merge the pack change through the repository's normal human gate
+before deploying it.
 
 ## Behavior change: preserve and report instead of release
 
@@ -17,7 +22,8 @@ without releasing. So preserve-and-report replaces a release only for an
 unreadable readback; for a mismatch it replaces drain-ack-and-leave. The new
 helper never releases, reopens, or drains while ownership is uncertain. On `CLAIM_UNKNOWN` (exit 75) or `CLAIM_REJECTED`
 (exit 76) the polecat leaves the bead untouched, mails the full helper output to
-the coordinator (`gasvillage.mayor` at claim time), and stops without
+the coordinator (the pack's mayor under its import binding, such as
+`gasvillage.mayor`, at claim time), and stops without
 acknowledging a drain.
 
 A bead can therefore stay `in_progress` and assigned to a stopped polecat

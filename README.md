@@ -178,6 +178,12 @@ Run the disposable fake-CLI checks with:
 assets/scripts/test-hook-claim.sh
 ```
 
+The checks need `jq` and the `gc` that polecats run, on `PATH` or named by
+`GC_CONTRACT_BIN=/path/to/gc`: they pin the SDK contract the helper relies on
+(`gc hook --drain-ack`, the `drain_acknowledged` result field, and the
+"has no current claim" diagnostic) against that binary. They never contact a
+live city or store.
+
 ## Adding a crew member
 
 Crew are **user-named**, so they aren't pack-stamped — you create one

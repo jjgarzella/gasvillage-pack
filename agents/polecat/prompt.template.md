@@ -81,11 +81,11 @@ and reason tokens; this is the decision you act on):
 To report and stop, do not touch any bead: do not release,
 reopen, or claim again, and do not run `gc runtime drain-ack` — a drain could
 strand a bead this session may own. Report it once to the coordinator
-(`gasvillage.mayor` at claim time, since no assignment names another), then
+(`{{ .BindingPrefix }}mayor` at claim time, since no assignment names another), then
 stop and end your turn so the coordinator can inspect the session and bead:
 
 ```bash
-gc mail send gasvillage.mayor -s "CLAIM_<UNKNOWN|REJECTED>: <reason>" \
+gc mail send {{ .BindingPrefix }}mayor -s "CLAIM_<UNKNOWN|REJECTED>: <reason>" \
   -m "session $GC_SESSION_ID rig $GC_RIG; full helper stdout and stderr: <output>"
 ```
 
@@ -120,7 +120,7 @@ branch, worktree path, and remaining work in the handoff:
 
 Use the task's named coordinator for holds, retries, and blocker reports. Set
 `COORDINATOR` to that identity before running the commands below; use
-`gasvillage.mayor` only when the assignment names no coordinator.
+`{{ .BindingPrefix }}mayor` only when the assignment names no coordinator.
 
 ```bash
 {{ template "polecat-pack-dir" . }}

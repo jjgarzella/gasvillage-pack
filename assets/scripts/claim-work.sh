@@ -21,6 +21,9 @@
 #   GC_SESSION_ID  required; must equal the bead's gc.session_id, the session
 #                  back-reference the SDK stamps when it claims for a session.
 #   GC_BIN         optional gc binary override (tests).
+#   CLAIM_READBACK_RETRY_DELAY
+#                  optional seconds between readback attempts (default 1;
+#                  tests set 0). A non-numeric value is a usage error.
 #   GC_ALIAS, BEADS_ACTOR, GC_AGENT, GC_SESSION_NAME
 #                  optional; with GC_SESSION_ID they form this session's own
 #                  identity set. When a hook work result names the assignee,
@@ -81,6 +84,9 @@
 #                    malformed_result (claim-mode fallback).
 #   CLAIM_UNKNOWN    jq_unavailable        jq is not installed; nothing ran.
 #                    readback_unavailable  the readback could not be read.
+#                    helper_error          an unexpected helper failure (for
+#                                          example mktemp failed); the hook
+#                                          may already have claimed.
 #                    drain_ack_failed      a drain the SDK failed to acknowledge.
 #                    Pointer failures, alone in recover mode and as
 #                    <fallback>_<failure> in claim mode (for example
@@ -114,22 +120,49 @@ readonly BEAD_ID_PATTERN='^[A-Za-z0-9][A-Za-z0-9._-]*$'
 readonly REASON_PATTERN='^[a-z][a-z_]*$'
 readonly NO_CURRENT_CLAIM_DIAGNOSTIC='has no current claim'
 readonly READBACK_ATTEMPTS=3
+readonly READBACK_RETRY_DELAY="${CLAIM_READBACK_RETRY_DELAY:-1}"
 
 MODE="${1:-}"
 [[ "$MODE" == claim || "$MODE" == recover ]] || {
   echo "usage: claim-work.sh {claim|recover}" >&2
   exit "$EXIT_USAGE"
 }
+[[ "$READBACK_RETRY_DELAY" =~ ^[0-9]+([.][0-9]+)?$ ]] || {
+  echo "claim-work.sh: CLAIM_READBACK_RETRY_DELAY must be a non-negative number of seconds" >&2
+  exit "$EXIT_USAGE"
+}
+
+# terminal_marker MARKER prints this run's one terminal marker line.
+TERMINAL_MARKER_PRINTED=0
+terminal_marker() {
+  printf '%s\n' "$1"
+  TERMINAL_MARKER_PRINTED=1
+}
 
 unknown() {
-  printf 'CLAIM_UNKNOWN reason=%s\n' "$1"
+  terminal_marker "CLAIM_UNKNOWN reason=$1"
   exit "$EXIT_UNKNOWN"
 }
 
 rejected() {
-  printf 'CLAIM_REJECTED reason=%s\n' "$1"
+  terminal_marker "CLAIM_REJECTED reason=$1"
   exit "$EXIT_REJECTED"
 }
+
+# on_exit removes the scratch directory and keeps the marker contract when
+# set -e stops the helper on an unexpected failure: that run ends in
+# CLAIM_UNKNOWN reason=helper_error, never in a bare exit status.
+TMP_DIR=""
+on_exit() {
+  local status=$?
+  if [[ -n "$TMP_DIR" ]]; then rm -rf "$TMP_DIR"; fi
+  if ((status != 0)) && [[ "$TERMINAL_MARKER_PRINTED" != 1 ]]; then
+    printf 'claim-work.sh: unexpected failure (exit %s); ownership is unproven\n' "$status" >&2
+    printf 'CLAIM_UNKNOWN reason=helper_error\n'
+    exit "$EXIT_UNKNOWN"
+  fi
+}
+trap on_exit EXIT
 
 GC_BIN="${GC_BIN:-gc}"
 GC_SESSION_ID="${GC_SESSION_ID:-}"
@@ -145,7 +178,6 @@ for identity in "${GC_ALIAS:-}" "$GC_SESSION_ID" "${BEADS_ACTOR:-}" "${GC_AGENT:
 done
 
 TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gasvillage-hook-claim.XXXXXX")"
-trap 'rm -rf "$TMP_DIR"' EXIT
 
 # report_diagnostics LABEL FILE copies a captured gc stderr file to stderr.
 report_diagnostics() {
@@ -191,17 +223,20 @@ is_session_identity() {
 # store and prints CLAIMED_BEAD_ID only when the record proves this session owns
 # it. With CLOSED_REASON (pointer-derived ids), a closed bead is this session's
 # finished claim, not a disproven one: it reports CLAIM_UNKNOWN CLOSED_REASON.
+# Every failed attempt's errors are kept, labeled by attempt.
 verify_bead() {
   local bead_id="$1" exact_assignee="${2:-}" closed_reason="${3:-}"
   local attempt read_ok=0 status assignee session_id
   local show_file="$TMP_DIR/show.json" error_file="$TMP_DIR/show.err"
+  : >"$error_file"
   for ((attempt = 1; attempt <= READBACK_ATTEMPTS; attempt++)); do
-    if "$GC_BIN" bd show "$bead_id" --json >"$show_file" 2>"$error_file" \
+    printf 'readback attempt %d/%d:\n' "$attempt" "$READBACK_ATTEMPTS" >>"$error_file"
+    if "$GC_BIN" bd show "$bead_id" --json >"$show_file" 2>>"$error_file" \
       && jq -e . "$show_file" >/dev/null 2>>"$error_file"; then
       read_ok=1
       break
     fi
-    if ((attempt < READBACK_ATTEMPTS)); then sleep 1; fi
+    if ((attempt < READBACK_ATTEMPTS)); then sleep "$READBACK_RETRY_DELAY"; fi
   done
   if [[ "$read_ok" != 1 ]]; then
     report_diagnostics 'gc bd show' "$error_file"
@@ -226,7 +261,7 @@ verify_bead() {
     is_session_identity "$assignee" || rejected foreign_assignee
   fi
 
-  printf 'CLAIMED_BEAD_ID=%s\n' "$bead_id"
+  terminal_marker "CLAIMED_BEAD_ID=$bead_id"
 }
 
 if [[ "$MODE" == recover ]]; then
@@ -258,7 +293,7 @@ if hook_result_is '.action == "drain"'; then
     'if (.reason | type == "string") and (.reason | test($pattern)) then .reason else "invalid_drain_reason" end' \
     "$HOOK_OUT")"
   if hook_result_is '.drain_acknowledged == true'; then
-    printf 'SESSION_DRAINED reason=%s\n' "$DRAIN_REASON"
+    terminal_marker "SESSION_DRAINED reason=$DRAIN_REASON"
     exit 0
   fi
   [[ "$HOOK_CODE" -eq 0 ]] || unknown drain_ack_failed
@@ -270,6 +305,7 @@ if [[ "$HOOK_CODE" -eq 0 ]] && hook_result_is '
   and (.reason | type == "string")
   and (.bead_id | type == "string" and length > 0)
   and (.assignee | type == "string" and length > 0)'; then
+  report_diagnostics 'gc hook' "$HOOK_ERR"
   WORK_ID="$(jq -r '.bead_id' "$HOOK_OUT")"
   HOOK_ASSIGNEE="$(jq -r '.assignee' "$HOOK_OUT")"
   [[ "$WORK_ID" =~ $BEAD_ID_PATTERN ]] || rejected invalid_bead_id

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
-# Disposable fake-CLI checks for claim result recovery. Never contacts a live city.
+# Disposable fake-CLI checks for claim result recovery. Never contacts a live
+# city or store. Requires jq, and the gc that polecats run on PATH (or
+# GC_CONTRACT_BIN=/path/to/gc): the SDK contract pin below runs its
+# `hook --help` and searches the binary for contract text.
 set -euo pipefail
 export LC_ALL=C
 
@@ -134,6 +137,7 @@ non_turn_drain() {
 
 if [[ "${1:-}" == hook && "${2:-}" == --claim ]]; then
   printf 'hook_calls\n' >>"$MOCK_LOG"
+  [[ -z "${MOCK_HOOK_WARNING:-}" ]] || echo "gc hook --claim: warning: $MOCK_HOOK_WARNING" >&2
   drain_ack_flag=0
   for arg in "$@"; do [[ "$arg" != --drain-ack ]] || drain_ack_flag=1; done
   case "${MOCK_HOOK_MODE:-success}" in
@@ -229,7 +233,7 @@ if [[ "${1:-}" == bd && "${2:-}" == show ]]; then
   count=$(( $(cat "$MOCK_SHOW_COUNT" 2>/dev/null || echo 0) + 1 ))
   printf '%s\n' "$count" >"$MOCK_SHOW_COUNT"
   case "${MOCK_SHOW_MODE:-}" in
-    fail) echo 'mock read timeout' >&2; exit 124 ;;
+    fail) echo "mock read timeout on attempt $count" >&2; exit 124 ;;
     fail_valid_json) cat "$MOCK_STATE"; exit 1 ;;
     flaky) ((count > ${MOCK_SHOW_FAILURES:-1})) || { echo 'mock transient read failure' >&2; exit 124; } ;;
   esac
@@ -262,7 +266,8 @@ MOCK
 chmod +x "$MOCK_GC"
 
 # A pool session with no alias: the SDK records its claims under GC_SESSION_ID.
-export GC_BIN="$MOCK_GC" GC_RIG=research GC_SESSION_ID=session-a
+# Readback retries keep their count and order but not their production delay.
+export GC_BIN="$MOCK_GC" GC_RIG=research GC_SESSION_ID=session-a CLAIM_READBACK_RETRY_DELAY=0
 unset GC_ALIAS BEADS_ACTOR GC_AGENT GC_SESSION_NAME
 
 reset_state() {
@@ -272,7 +277,7 @@ reset_state() {
   rm -f "$MOCK_HOOK_PID" "$MOCK_SHOW_COUNT"
   unset MOCK_HOOK_MODE MOCK_HOOK_DELAY MOCK_HOOK_REASON MOCK_HOOK_ASSIGNEE MOCK_HOOK_BEAD_ID \
     MOCK_ASSIGNEE MOCK_SHOW_MODE MOCK_SHOW_FAILURES MOCK_READBACK MOCK_DRAIN_ACK_MODE \
-    MOCK_SKIP_POINTER MOCK_CURRENT_MODE
+    MOCK_SKIP_POINTER MOCK_CURRENT_MODE MOCK_HOOK_WARNING
 }
 
 # set_current_claimed [ASSIGNEE] stamps a verified claim and this session's pointer.
@@ -332,6 +337,40 @@ assert_eq "$RC" 76
 assert_output_has 'CLAIM_REJECTED reason=missing_session_id'
 assert_lacks "$MOCK_LOG" 'hook_calls'
 
+for delay in abc -1 '1;x'; do
+  reset_state
+  run env CLAIM_READBACK_RETRY_DELAY="$delay" "$HELPER" claim
+  assert_eq "$RC" 64
+  assert_stderr_has 'CLAIM_READBACK_RETRY_DELAY must be a non-negative number'
+  assert_lacks "$MOCK_LOG" 'hook_calls'
+done
+
+# An unexpected failure ends in exactly one CLAIM_UNKNOWN marker, never a bare
+# exit status: before the hook (mktemp fails) and after it claimed (a jq read
+# inside the readback fails under set -e).
+reset_state
+run env TMPDIR="$TMP/missing-tmpdir" "$HELPER" claim
+assert_eq "$RC" 75
+assert_output_has 'CLAIM_UNKNOWN reason=helper_error'
+assert_stderr_has 'unexpected failure'
+assert_lacks "$MOCK_LOG" 'hook_calls'
+
+mkdir -p "$TMP/badjq-bin"
+cat >"$TMP/badjq-bin/jq" <<BADJQ
+#!/usr/bin/env bash
+for arg in "\$@"; do [[ "\$arg" != '.[0].status // empty' ]] || exit 5; done
+exec "$(command -v jq)" "\$@"
+BADJQ
+chmod +x "$TMP/badjq-bin/jq"
+reset_state
+run env PATH="$TMP/badjq-bin:$ORIGINAL_PATH" "$HELPER" claim
+assert_eq "$RC" 75
+assert_output_has 'CLAIM_UNKNOWN reason=helper_error'
+assert_output_lacks 'CLAIMED_BEAD_ID'
+assert_calls hook_calls 1
+assert_calls show_calls 1
+assert_no_mutation
+
 # --- direct claims -----------------------------------------------------------
 
 # Only GC_SESSION_ID is set and the bead carries no workflow-root provenance
@@ -382,13 +421,16 @@ assert_eq "$RC" 76
 assert_output_has 'CLAIM_REJECTED reason=foreign_assignee'
 assert_no_mutation
 
-# The hook's bead id is validated before it reaches gc bd show.
+# The hook's bead id is validated before it reaches gc bd show. The hook's own
+# stderr is reported with the rejection.
 for bad_id in '../x' 'a b' '-x'; do
   reset_state
-  export MOCK_HOOK_MODE=invalid_id MOCK_HOOK_BEAD_ID="$bad_id"
+  export MOCK_HOOK_MODE=invalid_id MOCK_HOOK_BEAD_ID="$bad_id" MOCK_HOOK_WARNING='claim-path warning'
   run "$HELPER" claim
   assert_eq "$RC" 76
   assert_output_has 'CLAIM_REJECTED reason=invalid_bead_id'
+  assert_stderr_has 'gc hook diagnostics:'
+  assert_stderr_has 'claim-path warning'
   assert_lacks "$MOCK_LOG" 'show_calls'
   assert_lacks "$MOCK_LOG" 'current_calls'
   assert_no_mutation
@@ -489,20 +531,23 @@ done
 # A tool can yield while the original nested CLI is still running. Keep the
 # exact process handle, wait for that process, then simulate its response being
 # lost and recover only through the session's current-claim pointer.
+# The pid wait is bounded well above helper startup on a loaded host; the mock
+# publishes its pid before it sleeps, so MOCK_HOOK_DELAY only has to outlast the
+# liveness checks that follow the publish.
 reset_state
-export MOCK_HOOK_MODE=slow MOCK_HOOK_DELAY=1
-started="$(date +%s)"
+export MOCK_HOOK_MODE=slow MOCK_HOOK_DELAY=2
 "$HELPER" claim >"$TMP/original.out" 2>"$TMP/original.err" &
 original_pid=$!
-wait_for_file "$MOCK_HOOK_PID" 100 0.01 || fail 'mock hook did not publish its pid within the bounded wait'
+wait_for_file "$MOCK_HOOK_PID" 1000 0.01 || fail 'mock hook did not publish its pid within the bounded wait'
 hook_pid="$(cat "$MOCK_HOOK_PID")"
 kill -0 "$original_pid" 2>/dev/null || fail 'original helper exited before the simulated tool yield'
 kill -0 "$hook_pid" 2>/dev/null || fail 'nested gc process exited before the simulated tool yield'
 assert_has "$MOCK_LOG" 'hook_claimed'
-wait "$original_pid"
-completed="$(date +%s)"
-((completed - started >= 1)) || fail 'original nested command did not remain active for the measured delay'
+wait "$original_pid" || fail 'original helper failed after the simulated tool yield'
 kill -0 "$hook_pid" 2>/dev/null && fail 'nested gc process remained alive after its original handle completed'
+# The work result is printed only after the nested gc returned it, so this
+# proves the original handle waited for the slow hook.
+assert_has "$TMP/original.out" 'CLAIMED_BEAD_ID=fx-1'
 : >"$TMP/original.out" # the outer tool lost the completed result/marker
 run "$HELPER" recover
 assert_eq "$RC" 0
@@ -642,12 +687,17 @@ done
 # --- readback ------------------------------------------------------------------
 
 reset_state
-export MOCK_HOOK_MODE=success MOCK_SHOW_MODE=fail
+export MOCK_HOOK_MODE=success MOCK_SHOW_MODE=fail MOCK_HOOK_WARNING='claim-path warning'
 run "$HELPER" claim
 assert_eq "$RC" 75
 assert_output_has 'CLAIM_UNKNOWN reason=readback_unavailable'
+assert_stderr_has 'gc hook diagnostics:'
+assert_stderr_has 'claim-path warning'
 assert_stderr_has 'gc bd show diagnostics:'
-assert_stderr_has 'mock read timeout'
+for attempt in 1 2 3; do
+  assert_stderr_has "readback attempt $attempt/3:"
+  assert_stderr_has "mock read timeout on attempt $attempt"
+done
 assert_calls hook_calls 1
 assert_calls show_calls 3
 assert_lacks "$MOCK_LOG" 'current_calls'
@@ -793,19 +843,74 @@ done
 
 # --- reason vocabulary: the helper header is the single source -----------------
 
-# Every reason=<token> named by the prompt, README, or rollout doc must be one
-# the helper header documents, so prose cannot drift from the helper.
+# The documented vocabulary is the underscore-joined tokens of the header's
+# Reasons table only, not its prose. Every reason the helper source emits must
+# be documented there, and every reason=<token> the prompt, README, or rollout
+# doc names must be in it, so neither the source nor the prose can drift.
 HELPER_HEADER="$(sed -n '/^set -euo pipefail$/q;p' "$HELPER")"
+HELPER_BODY="$(sed -n '/^set -euo pipefail$/,$p' "$HELPER")"
+REASON_TABLE="$(sed -n '/^# Reasons/,/^# Agent decision rule/p' <<<"$HELPER_HEADER")"
+[[ -n "$REASON_TABLE" ]] || fail 'helper header has no Reasons table'
+# reason_tokens reads text on stdin and prints its whole-word reason tokens.
+reason_tokens() {
+  tr -s '[:space:]' '\n' | sed -e 's/^[(]*//' -e 's/[),;:.]*$//' \
+    | grep -E '^[a-z]+(_[a-z]+)+$' | sort -u || true
+}
+DOCUMENTED_REASONS="$(reason_tokens <<<"$REASON_TABLE")"
+# Claim-mode fallback composites, built from the reasons the source assigns.
+FALLBACK_REASONS="$(sed -n 's/^ *RECOVERY_REASON=\([a-z_]*\)$/\1/p' <<<"$HELPER_BODY" | sort -u)"
+POINTER_FAILURES="$( { sed -n 's/^ *POINTER_FAILURE=\([a-z_]*\)$/\1/p' <<<"$HELPER_BODY"
+  sed -n 's/.*\${RECOVERY_REASON}_\([a-z_]*\)".*/\1/p' <<<"$HELPER_BODY"; } | sort -u)"
+[[ "$(wc -w <<<"$FALLBACK_REASONS")" -ge 3 ]] || fail "expected at least 3 fallback reasons, found: $FALLBACK_REASONS"
+[[ "$(wc -w <<<"$POINTER_FAILURES")" -ge 4 ]] || fail "expected at least 4 pointer failures, found: $POINTER_FAILURES"
+COMPOSITE_REASONS="$(for fallback in $FALLBACK_REASONS; do
+  for failure in $POINTER_FAILURES; do printf '%s_%s\n' "$fallback" "$failure"; done
+done)"
+grep -Fq '<fallback>_<failure>' <<<"$REASON_TABLE" || fail 'Reasons table does not document <fallback>_<failure> composites'
+
+EMITTED_REASONS="$( {
+  grep -Eo '(unknown|rejected) [a-z][a-z_]*' <<<"$HELPER_BODY" | awk '{print $2}'
+  grep -Eo 'reason=[a-z][a-z_]*' <<<"$HELPER_BODY" | sed 's/^reason=//'
+  grep -Eo 'else "[a-z][a-z_]*" end' <<<"$HELPER_BODY" | cut -d'"' -f2
+  grep -Eo 'verify_bead "\$CURRENT_ID" "" [a-z][a-z_]*' <<<"$HELPER_BODY" | awk '{print $NF}'
+  printf '%s\n' $FALLBACK_REASONS $POINTER_FAILURES
+} | sort -u)"
+[[ "$(wc -w <<<"$EMITTED_REASONS")" -ge 18 ]] || fail "reason extraction from the helper source looks broken: $EMITTED_REASONS"
+for token in $EMITTED_REASONS; do
+  grep -qxF "$token" <<<"$DOCUMENTED_REASONS" \
+    || fail "claim-work.sh emits reason=$token, which its Reasons table does not document"
+done
+
+# check_doc_reasons DOC fails (status 1, offending token on stdout) when DOC
+# names a reason=<token> outside the documented vocabulary.
+check_doc_reasons() {
+  local token
+  while IFS= read -r token; do
+    grep -qxF "$token" <<<"$DOCUMENTED_REASONS" && continue
+    grep -qxF "$token" <<<"$COMPOSITE_REASONS" && continue
+    printf '%s\n' "$token"
+    return 1
+  done < <(grep -Eo 'reason=[a-z][a-z_]*' "$1" | sed 's/^reason=//' | sort -u)
+}
 for doc in "$PROMPT_TEMPLATE" "$SCRIPT_DIR/../../README.md" "$SCRIPT_DIR/../../docs/claim-recovery-rollout.md"; do
   [[ -f "$doc" ]] || fail "missing doc: $doc"
-  while IFS= read -r token; do
-    grep -Eq "(^|[^a-z_])${token}([^a-z_]|\$)" <<<"$HELPER_HEADER" \
-      || fail "$doc names reason=$token, which the claim-work.sh header does not document"
-  done < <(grep -Eo 'reason=[a-z][a-z_]*' "$doc" | sed 's/^reason=//' | sort -u)
+  bad_token="$(check_doc_reasons "$doc")" \
+    || fail "$doc names reason=$bad_token, which the claim-work.sh Reasons table does not document"
+done
+# Negative self-test: near-miss tokens that occur in header prose but are not
+# reasons must be caught.
+for bad_token in current closed hook result session no_work_stale_status; do
+  cp "$PROMPT_TEMPLATE" "$TMP/doc-check.md"
+  printf '\nCLAIM_UNKNOWN reason=%s\n' "$bad_token" >>"$TMP/doc-check.md"
+  if found="$(check_doc_reasons "$TMP/doc-check.md")"; then
+    fail "reason vocabulary check accepted reason=$bad_token"
+  fi
+  assert_eq "$found" "$bad_token"
 done
 # The prompt states the agent's re-claim exception; the helper header must too.
 for token in no_current_assignment pointer_closed; do
   assert_has "$PROMPT_TEMPLATE" "reason=$token"
+  grep -qxF "$token" <<<"$DOCUMENTED_REASONS" || fail "Reasons table does not document $token"
 done
 
 # --- prompt template: pack path decode ---------------------------------------------
