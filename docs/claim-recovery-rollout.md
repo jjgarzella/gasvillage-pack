@@ -10,9 +10,12 @@ the repository's normal human gate before deploying it.
 
 ## Behavior change: preserve and report instead of release
 
-The previous prompt released a claim back to the pool and drain-acked when its
-readback did not match. The new helper never releases, reopens, or drains while
-ownership is uncertain. On `CLAIM_UNKNOWN` (exit 75) or `CLAIM_REJECTED`
+The previous prompt released the claim back to the pool (status `open`, empty
+assignee) only when its readback stayed unreadable after retries, and on an
+assignee or status mismatch it reported `CLAIM_REJECTED` and drain-acked
+without releasing. So preserve-and-report replaces a release only for an
+unreadable readback; for a mismatch it replaces drain-ack-and-leave. The new
+helper never releases, reopens, or drains while ownership is uncertain. On `CLAIM_UNKNOWN` (exit 75) or `CLAIM_REJECTED`
 (exit 76) the polecat leaves the bead untouched, mails the full helper output to
 the coordinator (`gasvillage.mayor` at claim time), and stops without
 acknowledging a drain.
@@ -45,19 +48,32 @@ normal coordinator flow. The pack never does this automatically.
 
    It reads only `gc hook current --id-only`, reads the bead back with
    id-routed `gc bd show <id> --json`, and prints `CLAIMED_BEAD_ID=<id>` only
-   when the bead is `in_progress`, its `gc.session_id` equals
-   `$GC_SESSION_ID`, and its assignee is one of the session's own identities
-   (`GC_ALIAS`, `GC_SESSION_ID`, `BEADS_ACTOR`, `GC_AGENT`,
-   `GC_SESSION_NAME`). On `CLAIM_UNKNOWN` or
+   when it proves this session owns the bead (the ownership fields and
+   identity inputs are listed in the helper header). On `CLAIM_UNKNOWN` or
    `CLAIM_REJECTED`, leave the bead and session unchanged and follow the
-   report-and-stop handling above. Only `CLAIM_UNKNOWN
-   reason=no_current_assignment` (the SDK reported no current claim) and
-   `CLAIM_UNKNOWN reason=pointer_closed` (the session's most recent claim is
-   closed) mean the session holds nothing; `current_unavailable` and
-   `invalid_current_pointer` leave ownership uncertain.
+   report-and-stop handling above, except for the header's decision rule:
+   `recover` answering `CLAIM_UNKNOWN reason=no_current_assignment` or
+   `CLAIM_UNKNOWN reason=pointer_closed` means the SDK has said the session
+   holds no open claim, so one normal `claim` run is allowed.
 5. Do not issue a second `gc hook --claim`, search `bd ready`, clear an
    assignee, reopen a bead, or acknowledge a drain while the claim result is
-   unknown. The current-session pointer is the only recovery source.
+   unknown. The current-session pointer is the only recovery source. The
+   re-claim in step 4 is not a second claim on an unknown result: it follows
+   the SDK's positive answer that this session has no open claim.
+
+### Why a read-only pointer instead of re-running the hook
+
+`gc hook --claim` does adopt work already assigned to the session, so
+re-running it looks like an idempotent recovery. It is not safe while a result
+is unknown. The original process may still be running, so a second call races
+it. Adoption also depends on its assignment query seeing the earlier claim;
+if that query misses it (for example, a claim that is not yet visible, or one
+recorded under an identity the query does not match), the call claims a second
+routed bead for the same session. Reading the current-claim
+pointer never claims, so a lost result costs at most a report to the
+coordinator, never a duplicate claim. The helper reads only that pointer; the
+pointer's "no current claim" answer currently comes from SDK diagnostic text,
+pinned by `assets/scripts/test-hook-claim.sh` against the installed `gc`.
 
 ## Rollback
 

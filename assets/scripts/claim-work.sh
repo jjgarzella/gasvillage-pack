@@ -7,9 +7,10 @@
 #   claim    Runs `gc hook --claim --drain-ack --json` exactly once. A work
 #            result is verified by readback before it is reported. A drain
 #            result is reported from the SDK's own acknowledgment. When the
-#            hook output is lost, malformed, or a non-zero exit without a drain
-#            record, the helper falls back to this session's current-claim
-#            pointer (`gc hook current --id-only`) and verifies that bead.
+#            hook output is lost or malformed, or the hook exits non-zero
+#            without a drain record, the helper falls back to this session's
+#            current-claim pointer (`gc hook current --id-only`), prints
+#            CLAIM_RECOVERED, and verifies that bead.
 #   recover  Never claims. Reads only `gc hook current --id-only` and verifies
 #            that bead with the same readback.
 #
@@ -33,9 +34,14 @@
 # acknowledge, such as non_turn_context. The helper branches only on the drain
 # record's acknowledgment and the hook's exit status, never on a list of drain
 # reasons, so a reason the SDK adds later needs no change here. The SDK's drain
-# contract is cmd/gc/cmd_hook_claim.go writeHookClaimDrain (acknowledged: exit
-# 0; acknowledgment failed: exit 1 with the record still written) and
-# writeHookClaimNonTurnDrain (never acknowledged, exit 0).
+# contract for `gc hook --claim --drain-ack --json`: a drain it acknowledged
+# carries drain_acknowledged=true (exit 0); a failed acknowledgment still writes
+# the drain record, unacknowledged, and exits 1; a refusal a turn must not
+# acknowledge is never acknowledged and exits 0. An acknowledged drain record is
+# trusted over a non-zero exit status. A work record is trusted only with exit
+# 0; a non-zero exit takes the pointer fallback whatever stdout holds. The
+# hook bounds its own store calls with internal deadlines, so a timed-out claim
+# is an ordinary non-zero exit (hook_failed), not a distinct exit status.
 #
 # Readback: `gc bd show <id> --json`, deliberately not rig-scoped. The hook
 # federates its claim across the rig store and the city store and its result
@@ -45,10 +51,14 @@
 #
 # Current-claim pointer: `gc hook current` exits 1 both when the session has
 # claimed nothing and when the lookup itself fails. The SDK distinguishes them
-# only in its stderr text (cmd/gc/cmd_hook_current.go doHookCurrent), so the
-# helper matches NO_CURRENT_CLAIM_DIAGNOSTIC; test-hook-claim.sh fails when the
-# installed gc no longer contains that text. The pointer is the bead this
-# session most recently claimed and is not cleared when that bead closes.
+# only in its stderr text, so the helper matches NO_CURRENT_CLAIM_DIAGNOSTIC;
+# test-hook-claim.sh fails when the installed gc no longer contains that text.
+# This is a stopgap until the SDK offers a typed answer for "no current claim".
+# The pointer is the bead this session most recently claimed and is not
+# cleared when that bead closes.
+#
+# Requires jq. A missing jq is reported as CLAIM_UNKNOWN reason=jq_unavailable
+# before any gc call, never misread as a malformed or unreadable result.
 #
 # Stdout carries only these markers, exactly one terminal marker per run:
 #   CLAIMED_BEAD_ID=<id>            exit 0   ownership verified; work on <id>.
@@ -67,13 +77,15 @@
 #   SESSION_DRAINED  the SDK drain reason as reported (no_work, claims_errored,
 #                    drain_pending, stale_session, missing_session_registration,
 #                    or any later one), or invalid_drain_reason.
-#   CLAIM_RECOVERED  current_pointer (recover mode); hook_timeout, hook_failed,
-#                    empty_result, malformed_result (claim-mode fallback).
-#   CLAIM_UNKNOWN    readback_unavailable  the readback could not be read.
+#   CLAIM_RECOVERED  current_pointer (recover mode); hook_failed, empty_result,
+#                    malformed_result (claim-mode fallback).
+#   CLAIM_UNKNOWN    jq_unavailable        jq is not installed; nothing ran.
+#                    readback_unavailable  the readback could not be read.
 #                    drain_ack_failed      a drain the SDK failed to acknowledge.
 #                    Pointer failures, alone in recover mode and as
 #                    <fallback>_<failure> in claim mode (for example
-#                    hook_failed_no_current_assignment):
+#                    hook_failed_no_current_assignment or
+#                    empty_result_pointer_closed):
 #                      no_current_assignment  the SDK reported no current claim.
 #                      pointer_closed         the pointer names a closed bead,
 #                                             the session's finished claim.
@@ -88,6 +100,13 @@
 #                    A drain the SDK did not acknowledge but exited 0 for
 #                    (non_turn_context, or any later such refusal), reported
 #                    with the SDK reason or invalid_drain_reason.
+#
+# Agent decision rule: on CLAIM_UNKNOWN or CLAIM_REJECTED touch no bead, report,
+# and stop. The only exception is `recover` printing CLAIM_UNKNOWN with exactly
+# reason=no_current_assignment or reason=pointer_closed: the SDK answered that
+# this session holds no open claim, so the session may run `claim` once. The
+# claim-mode composites (<fallback>_no_current_assignment,
+# <fallback>_pointer_closed) are not that answer: the hook itself failed.
 set -euo pipefail
 
 readonly EXIT_USAGE=64 EXIT_UNKNOWN=75 EXIT_REJECTED=76
@@ -115,6 +134,10 @@ rejected() {
 GC_BIN="${GC_BIN:-gc}"
 GC_SESSION_ID="${GC_SESSION_ID:-}"
 [[ -n "$GC_SESSION_ID" ]] || rejected missing_session_id
+command -v jq >/dev/null 2>&1 || {
+  echo 'claim-work.sh: jq not found on PATH; ownership cannot be checked' >&2
+  unknown jq_unavailable
+}
 
 SESSION_IDENTITIES=()
 for identity in "${GC_ALIAS:-}" "$GC_SESSION_ID" "${BEADS_ACTOR:-}" "${GC_AGENT:-}" "${GC_SESSION_NAME:-}"; do
@@ -174,7 +197,7 @@ verify_bead() {
   local show_file="$TMP_DIR/show.json" error_file="$TMP_DIR/show.err"
   for ((attempt = 1; attempt <= READBACK_ATTEMPTS; attempt++)); do
     if "$GC_BIN" bd show "$bead_id" --json >"$show_file" 2>"$error_file" \
-      && jq -e . "$show_file" >/dev/null 2>&1; then
+      && jq -e . "$show_file" >/dev/null 2>>"$error_file"; then
       read_ok=1
       break
     fi
@@ -254,9 +277,7 @@ if [[ "$HOOK_CODE" -eq 0 ]] && hook_result_is '
   exit 0
 fi
 
-if [[ "$HOOK_CODE" -eq 124 ]]; then
-  RECOVERY_REASON=hook_timeout
-elif [[ "$HOOK_CODE" -ne 0 ]]; then
+if [[ "$HOOK_CODE" -ne 0 ]]; then
   RECOVERY_REASON=hook_failed
 elif [[ ! -s "$HOOK_OUT" ]]; then
   RECOVERY_REASON=empty_result

@@ -3,6 +3,18 @@
 set -euo pipefail
 export LC_ALL=C
 
+# Detach from any live city before anything else runs. The tests export a
+# fake GC_SESSION_ID for the helper; a process carrying a GC_SESSION_ID with no
+# session bead, attributed to a city through an inherited GC_CITY_PATH or
+# GC_CITY, is a process-table orphan to that city's supervisor, which SIGTERMs
+# it mid-test (gcs-h493). Scrubbing every GC_* and BEADS_* variable removes
+# that attribution and any route to a live store. GC_CONTRACT_BIN is read first
+# because it is this suite's own input.
+CONTRACT_BIN_OVERRIDE="${GC_CONTRACT_BIN:-}"
+while IFS= read -r var; do
+  case "$var" in GC_* | BEADS_*) unset "$var" ;; esac
+done < <(compgen -e)
+
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 HELPER="$SCRIPT_DIR/claim-work.sh"
 PROMPT_TEMPLATE="$SCRIPT_DIR/../../agents/polecat/prompt.template.md"
@@ -12,6 +24,7 @@ trap 'rm -rf "$TMP"' EXIT
 export MOCK_STATE="$TMP/bead.json" MOCK_CURRENT="$TMP/current" \
   MOCK_LOG="$TMP/gc.log" MOCK_HOOK_PID="$TMP/hook.pid" MOCK_SHOW_COUNT="$TMP/show.count"
 MOCK_GC="$TMP/gc"
+ORIGINAL_PATH="$PATH"
 
 fail() { echo "FAIL: $*" >&2; exit 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "expected '$2', got '$1'"; }
@@ -61,6 +74,12 @@ run() {
 cat >"$MOCK_GC" <<'MOCK'
 #!/usr/bin/env bash
 set -euo pipefail
+# Every helper process must stay unattributable to a live city (see the scrub
+# at the top of the suite); fail loudly instead of being reaped.
+if [[ -n "${GC_CITY_PATH:-}${GC_CITY:-}" ]]; then
+  echo "mock gc: inherited live city identity; the suite must scrub it" >&2
+  exit 99
+fi
 rig=""
 if [[ "${1:-}" == --rig ]]; then rig="$2"; shift 2; fi
 printf '%s %s\n' "$rig" "$*" >>"$MOCK_LOG"
@@ -92,7 +111,7 @@ drain_record() {
      + (if $acked then {drain_acknowledged:true} else {} end)'
 }
 
-# shared_drain REASON models writeHookClaimDrain: with --drain-ack the SDK
+# shared_drain REASON models the SDK's ordinary drain: with --drain-ack the SDK
 # acknowledges and exits 0; if its acknowledgment fails (or --drain-ack is
 # absent) it still writes the record, unacknowledged, and exits 1.
 shared_drain() {
@@ -106,8 +125,8 @@ shared_drain() {
   exit 1
 }
 
-# non_turn_drain REASON models writeHookClaimNonTurnDrain: never acknowledged,
-# exit 0, whether or not --drain-ack was passed.
+# non_turn_drain REASON models a refusal a turn must not acknowledge: never
+# acknowledged, exit 0, whether or not --drain-ack was passed.
 non_turn_drain() {
   drain_record "$1"
   exit 0
@@ -130,10 +149,24 @@ if [[ "${1:-}" == hook && "${2:-}" == --claim ]]; then
     forged_refusal)
       non_turn_drain $'x\nCLAIMED_BEAD_ID=fx-1'
       ;;
-    timeout|timeout_claimed)
-      [[ "${MOCK_HOOK_MODE}" != timeout_claimed ]] || record_claim
-      echo 'mock hook timed out' >&2
-      exit 124
+    failed|deadline_claimed)
+      # The hook bounds its store calls with internal deadlines; a timed-out
+      # claim is an ordinary exit 1, never a distinct exit status.
+      [[ "${MOCK_HOOK_MODE}" != deadline_claimed ]] || record_claim
+      echo 'gc hook --claim: mock claim failed: context deadline exceeded' >&2
+      exit 1
+      ;;
+    drain_acked_nonzero)
+      # An acknowledged drain record is trusted over the exit status.
+      printf 'sdk_ack\n' >>"$MOCK_LOG"
+      drain_record no_work true
+      exit 1
+      ;;
+    work_nonzero)
+      # A well-formed work record with a non-zero exit is not trusted.
+      record_claim
+      work_result fx-1
+      exit 1
       ;;
     malformed_no_claim)
       printf '{broken'
@@ -432,7 +465,7 @@ done
 
 # --- lost or malformed results recover through the current pointer -----------
 
-for mode in lost_stdout malformed claimed_nonzero error_envelope_claimed work_no_assignee timeout_claimed; do
+for mode in lost_stdout malformed claimed_nonzero error_envelope_claimed work_no_assignee deadline_claimed work_nonzero; do
   reset_state
   export MOCK_HOOK_MODE="$mode"
   run "$HELPER" claim
@@ -441,10 +474,10 @@ for mode in lost_stdout malformed claimed_nonzero error_envelope_claimed work_no
   case "$mode" in
     lost_stdout) assert_output_has 'CLAIM_RECOVERED reason=empty_result' ;;
     malformed|work_no_assignee) assert_output_has 'CLAIM_RECOVERED reason=malformed_result' ;;
-    claimed_nonzero|error_envelope_claimed) assert_output_has 'CLAIM_RECOVERED reason=hook_failed' ;;
-    timeout_claimed)
-      assert_output_has 'CLAIM_RECOVERED reason=hook_timeout'
-      assert_stderr_has 'mock hook timed out'
+    claimed_nonzero|error_envelope_claimed|work_nonzero) assert_output_has 'CLAIM_RECOVERED reason=hook_failed' ;;
+    deadline_claimed)
+      assert_output_has 'CLAIM_RECOVERED reason=hook_failed'
+      assert_stderr_has 'context deadline exceeded'
       ;;
   esac
   assert_calls hook_calls 1
@@ -490,7 +523,7 @@ assert_output_has 'CLAIMED_BEAD_ID=fx-1'
 # The pointer is sticky: after a formula step closes, it still names that step.
 # A failed continuation claim reports the closed pointer as unproven ownership,
 # not as a disproven claim, and never as ownership.
-for mode in timeout:hook_timeout lost_stdout:empty_result; do
+for mode in failed:hook_failed lost_stdout:empty_result; do
   reset_state
   export MOCK_HOOK_MODE="${mode%%:*}" MOCK_READBACK=closed
   set_current_claimed
@@ -505,7 +538,7 @@ done
 
 # A pointer bead that is neither in_progress nor closed disproves ownership.
 reset_state
-export MOCK_HOOK_MODE=timeout MOCK_READBACK=stale_status
+export MOCK_HOOK_MODE=failed MOCK_READBACK=stale_status
 set_current_claimed
 run "$HELPER" claim
 assert_eq "$RC" 76
@@ -522,20 +555,20 @@ assert_no_mutation
 
 # A failed pointer lookup is not "nothing claimed".
 reset_state
-export MOCK_HOOK_MODE=timeout_claimed MOCK_CURRENT_MODE=unavailable
+export MOCK_HOOK_MODE=deadline_claimed MOCK_CURRENT_MODE=unavailable
 run "$HELPER" claim
 assert_eq "$RC" 75
-assert_output_has 'CLAIM_UNKNOWN reason=hook_timeout_current_unavailable'
+assert_output_has 'CLAIM_UNKNOWN reason=hook_failed_current_unavailable'
 assert_stderr_has 'mock session store read timed out'
 assert_no_mutation
 
 # Failed hooks with no pointer are unknown, and both CLI errors are reported.
 reset_state
-export MOCK_HOOK_MODE=timeout
+export MOCK_HOOK_MODE=failed
 run "$HELPER" claim
 assert_eq "$RC" 75
-assert_output_has 'CLAIM_UNKNOWN reason=hook_timeout_no_current_assignment'
-assert_stderr_has 'mock hook timed out'
+assert_output_has 'CLAIM_UNKNOWN reason=hook_failed_no_current_assignment'
+assert_stderr_has 'context deadline exceeded'
 assert_stderr_has 'gc hook current diagnostics:'
 assert_stderr_has "$NO_CURRENT_CLAIM_DIAGNOSTIC"
 assert_calls hook_calls 1
@@ -555,6 +588,55 @@ for mode in malformed_no_claim empty_no_claim; do
   assert_calls hook_calls 1
   assert_calls current_calls 1
   assert_no_mutation
+done
+
+# A work record from a non-zero hook is ignored even when it names a bead: with
+# no pointer stamp the claim stays unproven.
+reset_state
+export MOCK_HOOK_MODE=work_nonzero MOCK_SKIP_POINTER=1
+run "$HELPER" claim
+assert_eq "$RC" 75
+assert_output_has 'CLAIM_UNKNOWN reason=hook_failed_no_current_assignment'
+assert_lacks "$MOCK_LOG" 'show_calls'
+assert_no_mutation
+
+# A malformed pointer in the claim-mode fallback is unknown, never read back.
+reset_state
+export MOCK_HOOK_MODE=lost_stdout MOCK_SKIP_POINTER=1
+printf '../x\n' >"$MOCK_CURRENT"
+run "$HELPER" claim
+assert_eq "$RC" 75
+assert_output_has 'CLAIM_UNKNOWN reason=empty_result_invalid_current_pointer'
+assert_lacks "$MOCK_LOG" 'show_calls'
+assert_no_mutation
+
+# An acknowledged drain record wins over a non-zero exit status.
+reset_state
+export MOCK_HOOK_MODE=drain_acked_nonzero
+set_current_claimed
+run "$HELPER" claim
+assert_eq "$RC" 0
+assert_output_has 'SESSION_DRAINED reason=no_work'
+assert_lacks "$MOCK_LOG" 'current_calls'
+assert_lacks "$MOCK_LOG" 'show_calls'
+assert_no_mutation
+
+# A missing jq is named before any gc call, in both modes, instead of being
+# misread as a malformed hook result or an unreadable readback.
+mkdir -p "$TMP/nojq-bin"
+for tool in bash env mktemp rm sed grep cat sleep; do
+  ln -sf "$(command -v "$tool")" "$TMP/nojq-bin/$tool"
+done
+for mode in claim recover; do
+  reset_state
+  set_current_claimed
+  run env PATH="$TMP/nojq-bin" "$HELPER" "$mode"
+  assert_eq "$RC" 75
+  assert_output_has 'CLAIM_UNKNOWN reason=jq_unavailable'
+  assert_stderr_has 'jq not found'
+  assert_lacks "$MOCK_LOG" 'hook_calls'
+  assert_lacks "$MOCK_LOG" 'current_calls'
+  assert_lacks "$MOCK_LOG" 'show_calls'
 done
 
 # --- readback ------------------------------------------------------------------
@@ -668,6 +750,17 @@ assert_output_lacks 'CLAIMED_BEAD_ID'
 assert_lacks "$MOCK_LOG" 'hook_calls'
 assert_no_mutation
 
+reset_state
+set_current_claimed
+export MOCK_SHOW_MODE=fail
+run "$HELPER" recover
+assert_eq "$RC" 75
+assert_output_has 'CLAIM_RECOVERED reason=current_pointer'
+assert_output_has 'CLAIM_UNKNOWN reason=readback_unavailable'
+assert_calls show_calls 3
+assert_lacks "$MOCK_LOG" 'hook_calls'
+assert_no_mutation
+
 for readback in foreign_owner:foreign_assignee foreign_session:foreign_session_id stale_status:stale_status; do
   reset_state
   set_current_claimed
@@ -681,17 +774,38 @@ done
 
 # --- SDK contract pin ------------------------------------------------------------
 
-# The helper depends on two SDK texts that the fake CLI above can only repeat:
-# the --drain-ack flag and drain_acknowledged result field (gascity
-# cmd/gc/cmd_hook_claim.go), and the "no current claim" diagnostic of
-# gc hook current (cmd/gc/cmd_hook_current.go). Check the gc that polecats
+# The helper depends on SDK behavior that the fake CLI above can only repeat:
+# the `gc hook --drain-ack` flag, the drain_acknowledged result field, and the
+# "no current claim" diagnostic of `gc hook current`. Check the gc that polecats
 # actually run, so an SDK change fails here instead of stalling the pool.
 # Override the binary with GC_CONTRACT_BIN.
-REAL_GC="${GC_CONTRACT_BIN:-$(command -v gc || true)}"
+REAL_GC="${CONTRACT_BIN_OVERRIDE:-$(command -v gc || true)}"
 [[ -n "$REAL_GC" && -f "$REAL_GC" ]] || fail 'no installed gc to pin the SDK contract; set GC_CONTRACT_BIN'
-for contract_text in "$NO_CURRENT_CLAIM_DIAGNOSTIC" 'drain_acknowledged' 'drain-ack'; do
+# The flag is pinned on the hook command's own help: the bare text "drain-ack"
+# also names `gc runtime drain-ack` and would match without the flag.
+hook_help="$(cd "$TMP" && "$REAL_GC" hook --help 2>&1)" || fail "installed gc ($REAL_GC) hook --help failed: $hook_help"
+grep -Eq -- '(^|[[:space:]])--drain-ack([[:space:]]|$)' <<<"$hook_help" \
+  || fail "installed gc ($REAL_GC) gc hook no longer accepts --drain-ack"
+for contract_text in "$NO_CURRENT_CLAIM_DIAGNOSTIC" 'drain_acknowledged'; do
   LC_ALL=C grep -aFq -- "$contract_text" "$REAL_GC" \
     || fail "installed gc ($REAL_GC) no longer contains SDK contract text: $contract_text"
+done
+
+# --- reason vocabulary: the helper header is the single source -----------------
+
+# Every reason=<token> named by the prompt, README, or rollout doc must be one
+# the helper header documents, so prose cannot drift from the helper.
+HELPER_HEADER="$(sed -n '/^set -euo pipefail$/q;p' "$HELPER")"
+for doc in "$PROMPT_TEMPLATE" "$SCRIPT_DIR/../../README.md" "$SCRIPT_DIR/../../docs/claim-recovery-rollout.md"; do
+  [[ -f "$doc" ]] || fail "missing doc: $doc"
+  while IFS= read -r token; do
+    grep -Eq "(^|[^a-z_])${token}([^a-z_]|\$)" <<<"$HELPER_HEADER" \
+      || fail "$doc names reason=$token, which the claim-work.sh header does not document"
+  done < <(grep -Eo 'reason=[a-z][a-z_]*' "$doc" | sed 's/^reason=//' | sort -u)
+done
+# The prompt states the agent's re-claim exception; the helper header must too.
+for token in no_current_assignment pointer_closed; do
+  assert_has "$PROMPT_TEMPLATE" "reason=$token"
 done
 
 # --- prompt template: pack path decode ---------------------------------------------

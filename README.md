@@ -159,19 +159,15 @@ Polecat sessions use `assets/scripts/claim-work.sh claim` for one atomic
 command tool yields, keep polling that same execution handle until it exits.
 If the process finished but its result was lost, run
 `assets/scripts/claim-work.sh recover` in the same session; recovery reads
-only `gc hook current --id-only`. Both modes read the bead back with id-routed
-`gc bd show <id> --json` (the hook can claim from the rig store or the city
-store) and require `in_progress`, `gc.session_id` equal to `$GC_SESSION_ID`,
-and the assignee the hook reported (or, during recovery, one of the session's
-own identities). The helper never makes another atomic claim, releases a
-bead, or runs `gc runtime drain-ack` itself. Drain handling belongs to the
-SDK: any drain record means the hook claimed nothing, so no drain reason
-consults the session pointer. A drain the SDK acknowledged is reported as
-`SESSION_DRAINED`. A drain it failed to acknowledge is `CLAIM_UNKNOWN
-reason=drain_ack_failed`, and one it never acknowledges (such as
-`non_turn_context`) is rejected. Exit codes: 0 for `CLAIMED_BEAD_ID` or
-`SESSION_DRAINED`, 75 for `CLAIM_UNKNOWN`, 76 for `CLAIM_REJECTED`, 64 for
-usage. The script header documents every marker, reason token, and input.
+only this session's current-claim pointer (`gc hook current --id-only`).
+`claim` also falls back to that pointer, and prints `CLAIM_RECOVERED`, when
+the hook's own output is lost, malformed, or a failure without a drain record.
+The helper never makes another atomic claim, releases a bead, or runs
+`gc runtime drain-ack` itself; drain acknowledgment belongs to the SDK.
+
+The header of `assets/scripts/claim-work.sh` is the single authoritative
+description of its markers, exit codes, reason tokens, identity inputs, and
+the agent decision rule; the polecat prompt carries only that decision rule.
 See
 [Claim recovery rollout](docs/claim-recovery-rollout.md) for operator rollout,
 the preserve-and-report behavior change, and rollback steps.
