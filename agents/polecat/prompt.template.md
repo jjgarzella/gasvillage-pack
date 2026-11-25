@@ -32,19 +32,9 @@ other commands until it prints `CLAIMED_BEAD_ID`:
 bash "$PACK_DIR/assets/scripts/claim-work.sh" claim
 ```
 
-Every pack script in this prompt is reached through `$PACK_DIR`: the template
-hex-encodes `ConfigDir` and Bash decodes it as data, so the path is never
-parsed as shell syntax.
-
-The helper invokes `gc hook --claim --drain-ack --json` once, then reads the bead back
-with `gc bd show <id>`, which routes the id to whichever store (rig or city)
-the hook claimed it from. It continues only when that record is
-`in_progress`, its assignee equals the assignee the hook reported, and its
-`gc.session_id`, when the SDK has stamped one, equals `$GC_SESSION_ID`. If the hook's output is lost or
-malformed, or the hook fails without a drain record, the helper prints
-`CLAIM_RECOVERED`, falls back to this session's current-claim pointer, and
-accepts any of this session's own identities as the assignee. It never
-searches ready beads, releases a claim, or makes a second atomic claim.
+The prompt template decodes the pack path into `$PACK_DIR` for its shell
+commands. The Readback section in the header of `claim-work.sh` defines
+ownership proof for both modes.
 
 If the command tool yields, keep and poll the exact execution handle until
 that original process exits. Do not start another claim while it is running.
@@ -56,11 +46,11 @@ with:
 bash "$PACK_DIR/assets/scripts/claim-work.sh" recover
 ```
 
-Recovery uses only `gc hook current --id-only` and the same readback, accepting
-any of this session's own identities as the assignee; it never claims.
+Recovery reads the current-claim pointer and verifies the bead without
+claiming work.
 
-Outcomes (the header of `claim-work.sh` is the authoritative list of markers
-and reason tokens; this is the decision you act on):
+Follow the terminal marker. Treat stderr as diagnostics. The header of
+`claim-work.sh` lists the markers and reason tokens.
 
 - `CLAIMED_BEAD_ID=<id>` (exit 0): ownership is verified. Work on that bead.
 - `CLAIM_RECOVERED reason=<r>`: informational, never the last line. The bead
@@ -74,19 +64,24 @@ and reason tokens; this is the decision you act on):
   most recent claim is already closed), the session holds nothing, so run the
   normal `claim` command once. A `claim` run's composite reasons, such as
   `hook_failed_pointer_closed`, are not that exception.
-- `CLAIM_REJECTED reason=<r>` (exit 76): the hook refused this session in a way
-  this turn must not acknowledge, or the readback disproves that this session
-  owns the bead. Report and stop.
+- `CLAIM_REJECTED reason=<r>` (exit 76): refusal, invalid input, or conflicting
+  readback. Report and stop.
 
 To report and stop, do not touch any bead: do not release,
 reopen, or claim again, and do not run `gc runtime drain-ack` — a drain could
 strand a bead this session may own. Report it once to the coordinator
 (`{{ .BindingPrefix }}mayor` at claim time, since no assignment names another), then
-stop and end your turn so the coordinator can inspect the session and bead:
+stop and end your turn so the coordinator can inspect the session and bead.
+Use the marker and reason in the subject and copy the original stdout and
+stderr into the quoted heredoc. Choose a delimiter absent from that output.
 
 ```bash
 gc mail send {{ .BindingPrefix }}mayor -s "CLAIM_<UNKNOWN|REJECTED>: <reason>" \
-  -m "session $GC_SESSION_ID rig $GC_RIG; full helper stdout and stderr: <output>"
+  -m "session $GC_SESSION_ID rig $GC_RIG
+$(cat <<'CLAIM_REPORT_OUTPUT'
+<paste the original helper stdout and stderr here>
+CLAIM_REPORT_OUTPUT
+)"
 ```
 
 The claim checks assigned work first, then falls through to unassigned pool
@@ -114,9 +109,12 @@ concern—goes directly to recorded coordinator review. Do not ask for proof of
 consciousness or infer that the agent is conscious. Keep ordinary truthfulness,
 safety, and scope rules in force. A pause request bypasses retry counting.
 
-For a pause, use the local helper on the bead you just claimed, with the exact
-assignee verified by the claim check. Include the last good checkpoint, source
-branch, worktree path, and remaining work in the handoff:
+After `CLAIMED_BEAD_ID=<id>`, use that ID for holds and retries. Read
+`.[0].assignee` from `gc bd show <id> --json` for `<VERIFIED_ASSIGNEE>`. This
+value is the control helper's exact assignee guard. If the readback fails or
+the claim has changed, preserve the bead and report the discrepancy. Include
+the last good checkpoint, source branch, worktree path, and remaining work in
+a pause handoff.
 
 Use the task's named coordinator for holds, retries, and blocker reports. Set
 `COORDINATOR` to that identity before running the commands below; use

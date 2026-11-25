@@ -32,17 +32,24 @@ not only an unreadable readback (`reason=readback_unavailable`): the hook may
 have claimed before the helper failed (`reason=helper_error`), was stopped by
 a signal (`reason=helper_interrupted`), or could not read the session's
 current-claim pointer (for example `reason=hook_failed_current_unavailable`).
-The coordinator's report mail names the session, rig, and helper output, but
-the output carries a bead id only when the helper reached a readback. When it
-has none, read the stopped session's pointer without claiming, either with
-`GC_SESSION_ID=<session-id> gc hook current --id-only` or from the
-`current_claim_bead_id` metadata of the session bead (`gc bd show
-<session-id> --json`). The pointer names the session's most recent claim and
-may be an older, closed bead, so check it against the time of the report.
-Inspect the bead with `gc bd show <id>` (id-routed to the rig or city store),
-confirm the session is no longer working it, and then release or reassign the
-bead through the city's normal coordinator flow. The pack never does this
-automatically.
+### Triage a claim report
+
+1. Read the `CLAIM_UNKNOWN` or `CLAIM_REJECTED` mail for the session ID,
+   rig, and original helper output. Inspect the session to determine
+   whether its claim command or any work is still running.
+2. Read the reported session's latest claim with
+   `GC_SESSION_ID=<session-id> gc hook current --id-only`, or read
+   `current_claim_bead_id` from `gc bd show <session-id> --json`. Compare
+   the pointer with the report and claim time. It may still name an older
+   bead that has since closed.
+3. Use `gc bd show <id> --json` to inspect the bead in its owning store.
+   Verify the status, assignee, and session stamp using the Readback rule
+   in the helper header. Preserve the bead and investigate further if the
+   pointer is missing, the store is unreadable, or the record is ambiguous.
+4. Once the exact claim is verified and the session has stopped working
+   on it, use the city's coordinator flow to release or reassign the bead.
+   Guard the update by its current status and assignee, and preserve its
+   branch, worktree, and checkpoint. A closed claim needs no reassignment.
 
 ## Rollout
 
@@ -99,7 +106,8 @@ previous reviewed pack revision. New sessions then use the previous prompt.
 Running sessions do not reload either revision, so handle any uncertain claim
 with the read-only `recover` check above while the helper is still present, or
 by reading the same fields from `gc bd show <id> --json`
-(`.[0].status`, `.[0].assignee`, and `.[0].metadata["gc.session_id"]`; the
-metadata key is the literal dotted string, and the SDK writes it best-effort,
-so an absent key is not evidence of another owner). Preserve valid in-progress claims;
-do not bulk unroute, reopen, or drain beads as part of rollback.
+(`.[0].status`, `.[0].assignee`, and `.[0].metadata["gc.session_id"]`).
+Require the expected bead and an `in_progress` status. Follow the helper's
+Readback rule for the assignee and stamp. With no stamp, only an assignee
+exactly equal to the canonical `GC_SESSION_ID` proves ownership. Preserve
+valid and uncertain claims during rollback.

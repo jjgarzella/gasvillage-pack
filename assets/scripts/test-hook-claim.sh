@@ -23,9 +23,12 @@ HELPER="$SCRIPT_DIR/claim-work.sh"
 PROMPT_TEMPLATE="$SCRIPT_DIR/../../agents/polecat/prompt.template.md"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
+export TMPDIR="$TMP/helper-tmp"
+mkdir -p "$TMPDIR"
 
 export MOCK_STATE="$TMP/bead.json" MOCK_CURRENT="$TMP/current" \
-  MOCK_LOG="$TMP/gc.log" MOCK_HOOK_PID="$TMP/hook.pid" MOCK_SHOW_COUNT="$TMP/show.count"
+  MOCK_LOG="$TMP/gc.log" MOCK_CHILD_PID="$TMP/child.pid" MOCK_RELEASE_CHILD="$TMP/release-child" \
+  MOCK_SHOW_COUNT="$TMP/show.count"
 MOCK_GC="$TMP/gc"
 ORIGINAL_PATH="$PATH"
 
@@ -60,6 +63,7 @@ assert_stream_contract() {
   terminal="$(grep -Ec "$TERMINAL_MARKER" "$TMP/stdout" || true)"
   [[ "$RC" != 64 ]] || expected=0
   [[ "$terminal" == "$expected" ]] || fail "expected $expected terminal marker(s), got $terminal: $(cat "$TMP/stdout")"
+  [[ -z "$(ls -A "$TMPDIR")" ]] || fail "helper scratch directory was left in $TMPDIR"
 }
 
 # run CMD... captures stdout and stderr separately in $TMP/stdout and
@@ -135,6 +139,19 @@ non_turn_drain() {
   exit 0
 }
 
+# Publish readiness and wait for the test to release this child. The bound is
+# only a cleanup deadline if the test exits before releasing it.
+wait_for_release() {
+  local attempt
+  printf '%s\n' "$$" >"$MOCK_CHILD_PID"
+  for ((attempt = 0; attempt < 3000; attempt++)); do
+    [[ ! -e "$MOCK_RELEASE_CHILD" ]] || return 0
+    sleep 0.01
+  done
+  echo 'mock timed out waiting for the test to release it' >&2
+  exit 124
+}
+
 if [[ "${1:-}" == hook && "${2:-}" == --claim ]]; then
   printf 'hook_calls\n' >>"$MOCK_LOG"
   [[ -z "${MOCK_HOOK_WARNING:-}" ]] || echo "gc hook --claim: warning: $MOCK_HOOK_WARNING" >&2
@@ -196,15 +213,21 @@ if [[ "${1:-}" == hook && "${2:-}" == --claim ]]; then
       printf '{"schema_version":"1","ok":true,"command":"hook","action":"work","reason":"claimed","bead_id":"fx-1"}\n'
       exit 0
       ;;
-    success|slow|lost_stdout|malformed|claimed_nonzero)
+    invalid_work_envelope)
+      record_claim
+      work_result fx-1 | jq -c "$MOCK_ENVELOPE_FILTER"
+      exit 0
+      ;;
+    invalid_drain_envelope)
+      drain_record no_work true | jq -c '.schema_version = "2"'
+      exit 0
+      ;;
+    success|blocked|lost_stdout|malformed|claimed_nonzero)
       record_claim
       ;;
     *) echo "unknown mock hook mode" >&2; exit 2 ;;
   esac
-  if [[ "${MOCK_HOOK_MODE:-success}" == slow ]]; then
-    printf '%s\n' "$$" >"$MOCK_HOOK_PID"
-    sleep "${MOCK_HOOK_DELAY:-1}"
-  fi
+  [[ "${MOCK_HOOK_MODE:-success}" != blocked ]] || wait_for_release
   if [[ "${MOCK_HOOK_MODE:-success}" == lost_stdout ]]; then exit 0; fi
   if [[ "${MOCK_HOOK_MODE:-success}" == malformed ]]; then printf '{broken'; exit 0; fi
   if [[ "${MOCK_HOOK_MODE:-success}" == claimed_nonzero ]]; then exit 1; fi
@@ -222,6 +245,9 @@ if [[ "${1:-}" == hook && "${2:-}" == current ]]; then
     echo "gc hook current: session ${GC_SESSION_ID:-} ${NO_CURRENT_CLAIM_DIAGNOSTIC} (nothing claimed through gc hook --claim)" >&2
     exit 1
   fi
+  if [[ "${MOCK_CURRENT_MODE:-}" == warning ]]; then
+    echo 'gc hook current: mock pointer read warning' >&2
+  fi
   cat "$MOCK_CURRENT"
   exit 0
 fi
@@ -233,6 +259,7 @@ if [[ "${1:-}" == bd && "${2:-}" == show ]]; then
   count=$(( $(cat "$MOCK_SHOW_COUNT" 2>/dev/null || echo 0) + 1 ))
   printf '%s\n' "$count" >"$MOCK_SHOW_COUNT"
   case "${MOCK_SHOW_MODE:-}" in
+    blocked) wait_for_release ;;
     fail) echo "mock read timeout on attempt $count" >&2; exit 124 ;;
     fail_valid_json) cat "$MOCK_STATE"; exit 1 ;;
     flaky) ((count > ${MOCK_SHOW_FAILURES:-1})) || { echo 'mock transient read failure' >&2; exit 124; } ;;
@@ -277,8 +304,8 @@ reset_state() {
   jq -n '[{id:"fx-1",status:"open",assignee:"",metadata:{}}]' >"$MOCK_STATE"
   : >"$MOCK_LOG"
   : >"$MOCK_CURRENT"
-  rm -f "$MOCK_HOOK_PID" "$MOCK_SHOW_COUNT"
-  unset MOCK_HOOK_MODE MOCK_HOOK_DELAY MOCK_HOOK_REASON MOCK_HOOK_ASSIGNEE MOCK_HOOK_BEAD_ID \
+  rm -f "$MOCK_CHILD_PID" "$MOCK_RELEASE_CHILD" "$MOCK_SHOW_COUNT"
+  unset MOCK_HOOK_MODE MOCK_ENVELOPE_FILTER MOCK_HOOK_REASON MOCK_HOOK_ASSIGNEE MOCK_HOOK_BEAD_ID \
     MOCK_ASSIGNEE MOCK_SHOW_MODE MOCK_SHOW_FAILURES MOCK_READBACK MOCK_DRAIN_ACK_MODE \
     MOCK_SKIP_POINTER MOCK_CURRENT_MODE MOCK_HOOK_WARNING
 }
@@ -531,25 +558,44 @@ for mode in lost_stdout malformed claimed_nonzero error_envelope_claimed work_no
   assert_no_mutation
 done
 
-# A tool can yield while the original nested CLI is still running. Keep the
-# exact process handle, wait for that process, then simulate its response being
-# lost and recover only through the session's current-claim pointer.
-# The pid wait is bounded well above helper startup on a loaded host; the mock
-# publishes its pid before it sleeps, so MOCK_HOOK_DELAY only has to outlast the
-# liveness checks that follow the publish.
+# Each exit-zero record violates one envelope requirement. Recovery must
+# consult the pointer, including for a drain record carrying an unknown schema.
+for filter in '.schema_version = "2"' '.ok = false' '.command = "other"' '.reason = 1' 'del(.reason)'; do
+  reset_state
+  export MOCK_HOOK_MODE=invalid_work_envelope MOCK_ENVELOPE_FILTER="$filter"
+  run "$HELPER" claim
+  assert_eq "$RC" 0
+  assert_output_has 'CLAIM_RECOVERED reason=malformed_result'
+  assert_output_has 'CLAIMED_BEAD_ID=fx-1'
+  assert_calls hook_calls 1
+  assert_calls current_calls 1
+  assert_calls show_calls 1
+  assert_no_mutation
+done
 reset_state
-export MOCK_HOOK_MODE=slow MOCK_HOOK_DELAY=2
+set_current_claimed
+export MOCK_HOOK_MODE=invalid_drain_envelope
+run "$HELPER" claim
+assert_eq "$RC" 0
+assert_output_has 'CLAIM_RECOVERED reason=malformed_result'
+assert_output_has 'CLAIMED_BEAD_ID=fx-1'
+assert_output_lacks 'SESSION_DRAINED'
+assert_calls current_calls 1
+assert_no_mutation
+
+# A tool can yield while the nested CLI is still running. Wait on that exact
+# handle, then simulate losing its completed output and recover by pointer.
+reset_state
+export MOCK_HOOK_MODE=blocked
 "$HELPER" claim >"$TMP/original.out" 2>"$TMP/original.err" &
 original_pid=$!
-wait_for_file "$MOCK_HOOK_PID" 1000 0.01 || fail 'mock hook did not publish its pid within the bounded wait'
-hook_pid="$(cat "$MOCK_HOOK_PID")"
-kill -0 "$original_pid" 2>/dev/null || fail 'original helper exited before the simulated tool yield'
-kill -0 "$hook_pid" 2>/dev/null || fail 'nested gc process exited before the simulated tool yield'
+wait_for_file "$MOCK_CHILD_PID" 1000 0.01 || fail 'mock hook did not publish its pid within the bounded wait'
+hook_pid="$(cat "$MOCK_CHILD_PID")"
+kill -0 "$original_pid" "$hook_pid" 2>/dev/null || fail 'helper or hook exited before the simulated tool yield'
 assert_has "$MOCK_LOG" 'hook_claimed'
+touch "$MOCK_RELEASE_CHILD"
 wait "$original_pid" || fail 'original helper failed after the simulated tool yield'
 kill -0 "$hook_pid" 2>/dev/null && fail 'nested gc process remained alive after its original handle completed'
-# The work result is printed only after the nested gc returned it, so this
-# proves the original handle waited for the slow hook.
 assert_has "$TMP/original.out" 'CLAIMED_BEAD_ID=fx-1'
 : >"$TMP/original.out" # the outer tool lost the completed result/marker
 run "$HELPER" recover
@@ -559,36 +605,42 @@ assert_calls hook_calls 1
 assert_calls current_calls 1
 assert_calls show_calls 2
 
-# A signal that stops the helper still ends in exactly one CLAIM_UNKNOWN
-# marker, never a bare 143/129. Bash runs a trapped signal's handler only after
-# the running gc child returns, so the child is never orphaned mid-write.
-# (A background job ignores SIGINT on entry, so SIGINT cannot be driven here;
-# it shares the SIGTERM/SIGHUP handler.)
-for signal in TERM HUP; do
+# Deliver signals while the child is blocked, including a readback after an
+# actual claim. Job control keeps background Bash from inheriting ignored INT.
+for case in TERM:hook HUP:hook INT:show; do
   reset_state
-  export MOCK_HOOK_MODE=slow MOCK_HOOK_DELAY=1
-  set +e
+  signal="${case%%:*}" phase="${case#*:}"
+  if [[ "$phase" == hook ]]; then
+    export MOCK_HOOK_MODE=blocked
+    expected_show_calls=0
+  else
+    export MOCK_SHOW_MODE=blocked
+    expected_show_calls=1
+  fi
+  set -m
   "$HELPER" claim >"$TMP/stdout" 2>"$TMP/stderr" &
   helper_pid=$!
-  wait_for_file "$MOCK_HOOK_PID" 1000 0.01 || fail 'mock hook did not publish its pid within the bounded wait'
-  hook_pid="$(cat "$MOCK_HOOK_PID")"
-  kill "-$signal" "$helper_pid"
-  wait "$helper_pid"
-  RC=$?
-  set -e
+  wait_for_file "$MOCK_CHILD_PID" 1000 0.01 || fail "mock $phase did not publish its pid"
+  child_pid="$(cat "$MOCK_CHILD_PID")"
+  kill -0 "$helper_pid" "$child_pid" 2>/dev/null || fail "helper or $phase exited before SIG$signal"
+  assert_has "$MOCK_LOG" 'hook_claimed'
+  kill "-$signal" "$helper_pid" || fail "failed to deliver SIG$signal during $phase"
+  touch "$MOCK_RELEASE_CHILD"
+  RC=0
+  wait "$helper_pid" || RC=$?
+  set +m
   assert_stream_contract
   assert_eq "$RC" 75
   assert_output_has 'CLAIM_UNKNOWN reason=helper_interrupted'
   assert_output_lacks 'CLAIMED_BEAD_ID'
   assert_stderr_has "interrupted by SIG$signal"
-  kill -0 "$hook_pid" 2>/dev/null && fail "nested gc process outlived the helper after SIG$signal"
+  kill -0 "$child_pid" 2>/dev/null && fail "$phase child outlived the helper after SIG$signal"
   assert_calls hook_calls 1
-  assert_lacks "$MOCK_LOG" 'show_calls'
+  assert_calls show_calls "$expected_show_calls"
   assert_no_mutation
 done
 
-# An aliased session in the fallback has no hook assignee: any of the
-# session's identities may own the recovered bead.
+# A matching stamp permits a shared assignee after loss of the hook result.
 reset_state
 export MOCK_HOOK_MODE=lost_stdout MOCK_ASSIGNEE=alias-x
 run env GC_ALIAS=alias-x "$HELPER" claim
@@ -752,6 +804,10 @@ for failures in 1 2; do
   assert_eq "$RC" 0
   assert_output_has 'CLAIMED_BEAD_ID=fx-1'
   assert_calls show_calls "$((failures + 1))"
+  for ((attempt = 1; attempt <= failures; attempt++)); do
+    assert_stderr_has "readback attempt $attempt/3:"
+  done
+  assert_stderr_has 'mock transient read failure'
   assert_no_mutation
 done
 
@@ -759,9 +815,8 @@ expect_rejected foreign_owner foreign_assignee
 expect_rejected foreign_session foreign_session_id
 expect_rejected foreign_owner_no_stamp foreign_assignee
 
-# gc.session_id is a best-effort SDK stamp, so its absence never disproves a
-# claim: the hook's exact assignee and in_progress are what the atomic claim
-# guarantees, even when that assignee is an identity other sessions share.
+# An unstamped claim requires the canonical session ID as the assignee,
+# including when the hook names the same assignee as the readback.
 reset_state
 export MOCK_HOOK_MODE=success MOCK_READBACK=no_stamp
 run "$HELPER" claim
@@ -770,14 +825,19 @@ assert_output_has 'CLAIMED_BEAD_ID=fx-1'
 assert_stderr_has 'has no gc.session_id stamp'
 assert_no_mutation
 
-reset_state
-export MOCK_HOOK_MODE=success MOCK_READBACK=no_stamp MOCK_ASSIGNEE=agent-x
-run env GC_AGENT=agent-x "$HELPER" claim
-assert_eq "$RC" 0
-assert_output_has 'CLAIMED_BEAD_ID=fx-1'
+for owner in agent-x sdk-picked; do
+  reset_state
+  export MOCK_READBACK=no_stamp MOCK_ASSIGNEE="$owner"
+  run env GC_AGENT=agent-x "$HELPER" claim
+  assert_eq "$RC" 75
+  assert_output_has 'CLAIM_UNKNOWN reason=session_stamp_missing'
+  assert_output_lacks 'CLAIMED_BEAD_ID'
+  assert_calls hook_calls 1
+  assert_lacks "$MOCK_LOG" 'current_calls'
+  assert_no_mutation
+done
 
-# Without a hook result, an unstamped bead is proven only by an assignee that
-# names this session alone.
+# The same requirement applies when falling back to the pointer.
 reset_state
 export MOCK_HOOK_MODE=lost_stdout MOCK_READBACK=no_stamp
 run "$HELPER" claim
@@ -804,14 +864,17 @@ expect_rejected object bead_identity_mismatch
 
 reset_state
 set_current_claimed
+export MOCK_CURRENT_MODE=warning
 run "$HELPER" recover
+assert_stderr_has 'gc hook current diagnostics:'
+assert_stderr_has 'mock pointer read warning'
 assert_eq "$RC" 0
 assert_output_has 'CLAIM_RECOVERED reason=current_pointer'
 assert_output_has 'CLAIMED_BEAD_ID=fx-1'
 assert_lacks "$MOCK_LOG" 'hook_calls'
 assert_no_mutation
 
-# Recovery has no hook result, so any of this session's identities may own it.
+# A matching stamp lets recovery accept this session's configured identities.
 for var in GC_ALIAS BEADS_ACTOR GC_AGENT GC_SESSION_NAME; do
   reset_state
   set_current_claimed "ident-$var"
@@ -878,9 +941,8 @@ assert_calls show_calls 3
 assert_lacks "$MOCK_LOG" 'hook_calls'
 assert_no_mutation
 
-# An unstamped pointer-derived bead is proven by GC_SESSION_ID or
-# GC_SESSION_NAME as its assignee; an identity other sessions may share leaves
-# ownership unproven, and a foreign assignee still disproves it.
+# Only the canonical session ID proves an unstamped pointer-derived claim.
+# A reusable session name or shared identity leaves ownership unproven.
 reset_state
 set_current_claimed
 export MOCK_READBACK=no_stamp
@@ -889,14 +951,7 @@ assert_eq "$RC" 0
 assert_output_has 'CLAIMED_BEAD_ID=fx-1'
 assert_stderr_has 'has no gc.session_id stamp'
 
-reset_state
-set_current_claimed sess-name
-export MOCK_READBACK=no_stamp
-run env GC_SESSION_NAME=sess-name "$HELPER" recover
-assert_eq "$RC" 0
-assert_output_has 'CLAIMED_BEAD_ID=fx-1'
-
-for var in GC_ALIAS BEADS_ACTOR GC_AGENT; do
+for var in GC_ALIAS BEADS_ACTOR GC_AGENT GC_SESSION_NAME; do
   reset_state
   set_current_claimed "ident-$var"
   export MOCK_READBACK=no_stamp
@@ -934,8 +989,10 @@ REAL_GC="${CONTRACT_BIN_OVERRIDE:-$(command -v gc || true)}"
 hook_help="$(cd "$TMP" && "$REAL_GC" hook --help 2>&1)" || fail "installed gc ($REAL_GC) hook --help failed: $hook_help"
 grep -Eq -- '(^|[[:space:]])--drain-ack([[:space:]]|$)' <<<"$hook_help" \
   || fail "installed gc ($REAL_GC) gc hook no longer accepts --drain-ack"
+contract_texts="$(LC_ALL=C grep -aoF -e "$NO_CURRENT_CLAIM_DIAGNOSTIC" -e 'drain_acknowledged' "$REAL_GC")" \
+  || fail "could not read SDK contract text from installed gc ($REAL_GC)"
 for contract_text in "$NO_CURRENT_CLAIM_DIAGNOSTIC" 'drain_acknowledged'; do
-  LC_ALL=C grep -aFq -- "$contract_text" "$REAL_GC" \
+  grep -qxF -- "$contract_text" <<<"$contract_texts" \
     || fail "installed gc ($REAL_GC) no longer contains SDK contract text: $contract_text"
 done
 
@@ -1013,12 +1070,23 @@ done
 
 # --- prompt template: pack path decode ---------------------------------------------
 
-# Every pack script call site in the polecat prompt goes through $PACK_DIR, and
-# ConfigDir is interpolated only as hex.
+# Check the named script and both supported modes at the production call sites.
 [[ -f "$PROMPT_TEMPLATE" ]] || fail "missing prompt template: $PROMPT_TEMPLATE"
+script_call='["][$]PACK_DIR/assets/scripts/([a-zA-Z0-9._-]+)["]([[:blank:]]+([^[:blank:]]+))?'
+claim_seen=0 recover_seen=0
 while IFS= read -r line; do
-  [[ "$line" == *'$PACK_DIR/assets/scripts/'* ]] || fail "pack script call site bypasses \$PACK_DIR: $line"
+  [[ "$line" =~ $script_call ]] || fail "pack script call site bypasses \$PACK_DIR: $line"
+  script="${BASH_REMATCH[1]}" mode="${BASH_REMATCH[3]:-}"
+  [[ -f "$SCRIPT_DIR/$script" ]] || fail "pack script is missing: $script"
+  if [[ "$script" == claim-work.sh ]]; then
+    case "$mode" in
+      claim) claim_seen=1 ;;
+      recover) recover_seen=1 ;;
+      *) fail "invalid claim-work.sh mode: $mode" ;;
+    esac
+  fi
 done < <(grep -F 'assets/scripts/' "$PROMPT_TEMPLATE")
+((claim_seen && recover_seen)) || fail 'polecat prompt must show claim and recover'
 while IFS= read -r line; do
   [[ "$line" == *'{{ printf "%x" .ConfigDir }}'* ]] || fail "raw ConfigDir interpolation: $line"
 done < <(grep -F '.ConfigDir' "$PROMPT_TEMPLATE")

@@ -77,12 +77,15 @@ clear the route; re-read the bead and report the race. If mail or drain fails
 after the update, leave the bead blocked and unrouted, report the partial
 failure, and do not reopen or kill another session.
 
-Example from a claimed polecat task (fill in the reason, evidence, and
-handoff with the actual task details):
+After the claim helper verifies the bead, read its exact assignee for the
+hold or retry guard. Fill in the reason, evidence, and handoff with the task
+details.
 
 ```sh
+assignee=$(gc bd show "$CLAIMED_BEAD_ID" --json |
+  jq -er '.[0].assignee | strings | select(length > 0)') || exit 1
 assets/scripts/work-item-control.sh hold \
-  --rig "$GC_RIG" --bead "$CLAIMED_BEAD_ID" --owner "$BEADS_ACTOR" \
+  --rig "$GC_RIG" --bead "$CLAIMED_BEAD_ID" --owner "$assignee" \
   --coordinator gasvillage.mayor --session "${GC_SESSION_ID:-}" \
   --worktree "$PWD" \
   --reason "scope needs review" \
@@ -167,10 +170,10 @@ The helper never makes another atomic claim, releases a bead, or runs
 
 The header of `assets/scripts/claim-work.sh` is the single authoritative
 description of its markers, exit codes, reason tokens, identity inputs, and
-the agent decision rule; the polecat prompt carries only that decision rule.
-See
-[Claim recovery rollout](docs/claim-recovery-rollout.md) for operator rollout,
-the preserve-and-report behavior change, and rollback steps.
+the agent decision rule. The polecat prompt applies the outcome markers and
+shows how to report a claim that needs coordinator review. See the
+[claim recovery rollout guide](docs/claim-recovery-rollout.md) for rollout,
+report triage, and rollback.
 
 Run the disposable fake-CLI checks with:
 

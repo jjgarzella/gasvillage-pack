@@ -32,8 +32,8 @@
 #                  the readback must match that exact value. When no hook
 #                  result is available (recover, or claim-mode fallback), the
 #                  readback assignee must be one of these identities.
-#                  GC_SESSION_ID and GC_SESSION_NAME name only this session;
-#                  the others may be shared by several sessions.
+#                  Only GC_SESSION_ID identifies the session incarnation.
+#                  Other identities, including GC_SESSION_NAME, can be reused.
 #
 # Drains are the SDK's decision. `--drain-ack` makes the hook acknowledge every
 # drain it is allowed to acknowledge (it claimed nothing) and report that in
@@ -56,11 +56,13 @@
 # the bead. Ownership proof: exactly one record with the requested id, status
 # in_progress, and the expected assignee; the atomic claim guarantees those
 # two fields. A gc.session_id naming another session disproves ownership. The
-# SDK stamps gc.session_id best-effort after the claim, so a missing stamp is
-# not disproof: a hook work result's exact assignee still proves the claim it
-# just made, and a pointer-derived bead is proven only when its assignee names
-# this session alone (GC_SESSION_ID or GC_SESSION_NAME); otherwise ownership
-# stays unproven (session_stamp_missing).
+# SDK stamps gc.session_id best-effort after the claim. Without the stamp,
+# ownership requires an assignee exactly equal to GC_SESSION_ID in both modes;
+# otherwise ownership stays unproven (session_stamp_missing).
+#
+# This helper proves a claim before work begins. work-item-control.sh guards
+# later state changes by exact assignee and status and resolves the session to
+# record or drain. Its session lookup is scoped to those operations.
 #
 # Current-claim pointer: `gc hook current` exits 1 both when the session has
 # claimed nothing and when the lookup itself fails. The SDK distinguishes them
@@ -81,10 +83,10 @@
 #                                            and the SDK acknowledged the drain.
 #   CLAIM_UNKNOWN reason=<r>        exit 75  ownership is unproven; preserve the
 #                                            bead and session.
-#   CLAIM_REJECTED reason=<r>       exit 76  hook refusal, or the readback
-#                                            disproves ownership.
+#   CLAIM_REJECTED reason=<r>       exit 76  refusal, invalid input, or
+#                                            conflicting readback.
 #   usage error                     exit 64  (no marker)
-# Diagnostics, including gc output, go to stderr.
+# Diagnostics, including gc output, go to stderr. Act on the terminal marker.
 #
 # Reasons (every <r> matches ^[a-z][a-z_]*$):
 #   SESSION_DRAINED  the SDK drain reason as reported (no_work, claims_errored,
@@ -94,9 +96,8 @@
 #                    malformed_result (claim-mode fallback).
 #   CLAIM_UNKNOWN    jq_unavailable        jq is not installed; nothing ran.
 #                    readback_unavailable  the readback could not be read.
-#                    session_stamp_missing  a pointer-derived bead lacks
-#                                          gc.session_id and its assignee may
-#                                          be shared with other sessions.
+#                    session_stamp_missing  the bead lacks gc.session_id and
+#                                          its assignee is not GC_SESSION_ID.
 #                    helper_error          an unexpected helper failure (for
 #                                          example mktemp failed); the hook
 #                                          may already have claimed.
@@ -210,12 +211,12 @@ for identity in "${GC_ALIAS:-}" "$GC_SESSION_ID" "${BEADS_ACTOR:-}" "${GC_AGENT:
   if [[ -n "$identity" ]]; then SESSION_IDENTITIES+=("$identity"); fi
 done
 
-TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/gasvillage-hook-claim.XXXXXX")"
+TMP_DIR="$(mktemp -d "${TMPDIR:-/var/tmp}/gasvillage-hook-claim.XXXXXX")"
 
 # report_diagnostics LABEL FILE copies a captured gc stderr file to stderr.
 report_diagnostics() {
   if [[ -s "$2" ]]; then
-    printf '%s diagnostics:\n' "$1" >&2
+    printf '%s diagnostics: use the terminal marker to decide what to do\n' "$1" >&2
     cat "$2" >&2
   fi
 }
@@ -235,6 +236,7 @@ read_current_pointer() {
     fi
     return 1
   fi
+  report_diagnostics 'gc hook current' "$error_file"
   CURRENT_ID="$(sed -e 's/[[:space:]]*$//' "$output_file")"
   if [[ ! "$CURRENT_ID" =~ $BEAD_ID_PATTERN ]]; then
     printf 'gc hook current returned an invalid bead id\n' >&2
@@ -252,12 +254,6 @@ is_session_identity() {
   return 1
 }
 
-# is_session_unique_identity VALUE succeeds when VALUE names this session alone.
-is_session_unique_identity() {
-  [[ "$1" == "$GC_SESSION_ID" ]] && return 0
-  [[ -n "${GC_SESSION_NAME:-}" && "$1" == "$GC_SESSION_NAME" ]]
-}
-
 # verify_bead ID [EXACT_ASSIGNEE [CLOSED_REASON]] reads ID back from its owning
 # store and prints CLAIMED_BEAD_ID only when the record proves this session owns
 # it. With CLOSED_REASON (pointer-derived ids), a closed bead is this session's
@@ -267,20 +263,22 @@ verify_bead() {
   local bead_id="$1" exact_assignee="${2:-}" closed_reason="${3:-}"
   local attempt read_ok=0 status assignee session_id
   local show_file="$TMP_DIR/show.json" error_file="$TMP_DIR/show.err"
+  local attempt_errors="$TMP_DIR/show-attempt.err"
   : >"$error_file"
   for ((attempt = 1; attempt <= READBACK_ATTEMPTS; attempt++)); do
-    printf 'readback attempt %d/%d:\n' "$attempt" "$READBACK_ATTEMPTS" >>"$error_file"
-    if "$GC_BIN" bd show "$bead_id" --json >"$show_file" 2>>"$error_file" \
-      && jq -e . "$show_file" >/dev/null 2>>"$error_file"; then
+    if "$GC_BIN" bd show "$bead_id" --json >"$show_file" 2>"$attempt_errors" \
+      && jq -e . "$show_file" >/dev/null 2>>"$attempt_errors"; then
       read_ok=1
-      break
     fi
+    if [[ "$read_ok" != 1 || -s "$attempt_errors" ]]; then
+      printf 'readback attempt %d/%d:\n' "$attempt" "$READBACK_ATTEMPTS" >>"$error_file"
+      cat "$attempt_errors" >>"$error_file"
+    fi
+    [[ "$read_ok" != 1 ]] || break
     if ((attempt < READBACK_ATTEMPTS)); then sleep "$READBACK_RETRY_DELAY"; fi
   done
-  if [[ "$read_ok" != 1 ]]; then
-    report_diagnostics 'gc bd show' "$error_file"
-    unknown readback_unavailable
-  fi
+  report_diagnostics 'gc bd show' "$error_file"
+  [[ "$read_ok" == 1 ]] || unknown readback_unavailable
 
   jq -e --arg id "$bead_id" 'type == "array" and length == 1 and .[0].id == $id' \
     "$show_file" >/dev/null 2>&1 || rejected bead_identity_mismatch
@@ -302,10 +300,8 @@ verify_bead() {
     is_session_identity "$assignee" || rejected foreign_assignee
   fi
   if [[ -z "$session_id" ]]; then
-    printf 'bead %s has no gc.session_id stamp; proving ownership from status and assignee\n' "$bead_id" >&2
-    if [[ -z "$exact_assignee" ]] && ! is_session_unique_identity "$assignee"; then
-      unknown session_stamp_missing
-    fi
+    printf 'bead %s has no gc.session_id stamp; checking the canonical session ID against the assignee\n' "$bead_id" >&2
+    [[ "$assignee" == "$GC_SESSION_ID" ]] || unknown session_stamp_missing
   fi
 
   terminal_marker "CLAIMED_BEAD_ID=$bead_id"
