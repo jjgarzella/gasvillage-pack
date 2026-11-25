@@ -39,8 +39,8 @@ parsed as shell syntax.
 The helper invokes `gc hook --claim --drain-ack --json` once, then reads the bead back
 with `gc bd show <id>`, which routes the id to whichever store (rig or city)
 the hook claimed it from. It continues only when that record is
-`in_progress`, its `gc.session_id` equals `$GC_SESSION_ID`, and its assignee
-equals the assignee the hook reported. If the hook's output is lost or
+`in_progress`, its assignee equals the assignee the hook reported, and its
+`gc.session_id`, when the SDK has stamped one, equals `$GC_SESSION_ID`. If the hook's output is lost or
 malformed, or the hook fails without a drain record, the helper prints
 `CLAIM_RECOVERED`, falls back to this session's current-claim pointer, and
 accepts any of this session's own identities as the assignee. It never

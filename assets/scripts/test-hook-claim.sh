@@ -243,6 +243,9 @@ if [[ "${1:-}" == bd && "${2:-}" == show ]]; then
     normal) cat "$MOCK_STATE" ;;
     foreign_owner) jq '.[0].assignee="other-worker"' "$MOCK_STATE" ;;
     foreign_session) jq '.[0].metadata["gc.session_id"]="old-session"' "$MOCK_STATE" ;;
+    # The SDK stamps gc.session_id best-effort after the atomic claim.
+    no_stamp) jq '.[0].metadata |= del(.["gc.session_id"])' "$MOCK_STATE" ;;
+    foreign_owner_no_stamp) jq '.[0].assignee="other-worker" | .[0].metadata |= del(.["gc.session_id"])' "$MOCK_STATE" ;;
     closed) jq '.[0].status="closed"' "$MOCK_STATE" ;;
     stale_status) jq '.[0].status="open"' "$MOCK_STATE" ;;
     wrong_id) jq '.[0].id="fx-2"' "$MOCK_STATE" ;;
@@ -556,6 +559,34 @@ assert_calls hook_calls 1
 assert_calls current_calls 1
 assert_calls show_calls 2
 
+# A signal that stops the helper still ends in exactly one CLAIM_UNKNOWN
+# marker, never a bare 143/129. Bash runs a trapped signal's handler only after
+# the running gc child returns, so the child is never orphaned mid-write.
+# (A background job ignores SIGINT on entry, so SIGINT cannot be driven here;
+# it shares the SIGTERM/SIGHUP handler.)
+for signal in TERM HUP; do
+  reset_state
+  export MOCK_HOOK_MODE=slow MOCK_HOOK_DELAY=1
+  set +e
+  "$HELPER" claim >"$TMP/stdout" 2>"$TMP/stderr" &
+  helper_pid=$!
+  wait_for_file "$MOCK_HOOK_PID" 1000 0.01 || fail 'mock hook did not publish its pid within the bounded wait'
+  hook_pid="$(cat "$MOCK_HOOK_PID")"
+  kill "-$signal" "$helper_pid"
+  wait "$helper_pid"
+  RC=$?
+  set -e
+  assert_stream_contract
+  assert_eq "$RC" 75
+  assert_output_has 'CLAIM_UNKNOWN reason=helper_interrupted'
+  assert_output_lacks 'CLAIMED_BEAD_ID'
+  assert_stderr_has "interrupted by SIG$signal"
+  kill -0 "$hook_pid" 2>/dev/null && fail "nested gc process outlived the helper after SIG$signal"
+  assert_calls hook_calls 1
+  assert_lacks "$MOCK_LOG" 'show_calls'
+  assert_no_mutation
+done
+
 # An aliased session in the fallback has no hook assignee: any of the
 # session's identities may own the recovered bead.
 reset_state
@@ -726,6 +757,42 @@ done
 
 expect_rejected foreign_owner foreign_assignee
 expect_rejected foreign_session foreign_session_id
+expect_rejected foreign_owner_no_stamp foreign_assignee
+
+# gc.session_id is a best-effort SDK stamp, so its absence never disproves a
+# claim: the hook's exact assignee and in_progress are what the atomic claim
+# guarantees, even when that assignee is an identity other sessions share.
+reset_state
+export MOCK_HOOK_MODE=success MOCK_READBACK=no_stamp
+run "$HELPER" claim
+assert_eq "$RC" 0
+assert_output_has 'CLAIMED_BEAD_ID=fx-1'
+assert_stderr_has 'has no gc.session_id stamp'
+assert_no_mutation
+
+reset_state
+export MOCK_HOOK_MODE=success MOCK_READBACK=no_stamp MOCK_ASSIGNEE=agent-x
+run env GC_AGENT=agent-x "$HELPER" claim
+assert_eq "$RC" 0
+assert_output_has 'CLAIMED_BEAD_ID=fx-1'
+
+# Without a hook result, an unstamped bead is proven only by an assignee that
+# names this session alone.
+reset_state
+export MOCK_HOOK_MODE=lost_stdout MOCK_READBACK=no_stamp
+run "$HELPER" claim
+assert_eq "$RC" 0
+assert_output_has 'CLAIM_RECOVERED reason=empty_result'
+assert_output_has 'CLAIMED_BEAD_ID=fx-1'
+
+reset_state
+export MOCK_HOOK_MODE=lost_stdout MOCK_READBACK=no_stamp MOCK_ASSIGNEE=alias-x
+run env GC_ALIAS=alias-x "$HELPER" claim
+assert_eq "$RC" 75
+assert_output_has 'CLAIM_RECOVERED reason=empty_result'
+assert_output_has 'CLAIM_UNKNOWN reason=session_stamp_missing'
+assert_output_lacks 'CLAIMED_BEAD_ID'
+assert_no_mutation
 expect_rejected stale_status stale_status
 # A closed bead the hook itself named is disproven; only a pointer is sticky.
 expect_rejected closed stale_status
@@ -811,7 +878,38 @@ assert_calls show_calls 3
 assert_lacks "$MOCK_LOG" 'hook_calls'
 assert_no_mutation
 
-for readback in foreign_owner:foreign_assignee foreign_session:foreign_session_id stale_status:stale_status; do
+# An unstamped pointer-derived bead is proven by GC_SESSION_ID or
+# GC_SESSION_NAME as its assignee; an identity other sessions may share leaves
+# ownership unproven, and a foreign assignee still disproves it.
+reset_state
+set_current_claimed
+export MOCK_READBACK=no_stamp
+run "$HELPER" recover
+assert_eq "$RC" 0
+assert_output_has 'CLAIMED_BEAD_ID=fx-1'
+assert_stderr_has 'has no gc.session_id stamp'
+
+reset_state
+set_current_claimed sess-name
+export MOCK_READBACK=no_stamp
+run env GC_SESSION_NAME=sess-name "$HELPER" recover
+assert_eq "$RC" 0
+assert_output_has 'CLAIMED_BEAD_ID=fx-1'
+
+for var in GC_ALIAS BEADS_ACTOR GC_AGENT; do
+  reset_state
+  set_current_claimed "ident-$var"
+  export MOCK_READBACK=no_stamp
+  run env "$var=ident-$var" "$HELPER" recover
+  assert_eq "$RC" 75
+  assert_output_has 'CLAIM_RECOVERED reason=current_pointer'
+  assert_output_has 'CLAIM_UNKNOWN reason=session_stamp_missing'
+  assert_output_lacks 'CLAIMED_BEAD_ID'
+  assert_lacks "$MOCK_LOG" 'hook_calls'
+  assert_no_mutation
+done
+
+for readback in foreign_owner:foreign_assignee foreign_session:foreign_session_id foreign_owner_no_stamp:foreign_assignee stale_status:stale_status; do
   reset_state
   set_current_claimed
   export MOCK_READBACK="${readback%%:*}"

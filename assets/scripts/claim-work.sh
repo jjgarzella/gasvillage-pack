@@ -18,8 +18,10 @@
 # or reopens a bead, or runs `gc runtime drain-ack` itself.
 #
 # Environment:
-#   GC_SESSION_ID  required; must equal the bead's gc.session_id, the session
-#                  back-reference the SDK stamps when it claims for a session.
+#   GC_SESSION_ID  required. When the bead carries gc.session_id, the session
+#                  back-reference the SDK stamps after a claim, it must equal
+#                  this value. The SDK writes that stamp best-effort, so its
+#                  absence alone never disproves ownership (see Readback).
 #   GC_BIN         optional gc binary override (tests).
 #   CLAIM_READBACK_RETRY_DELAY
 #                  optional seconds between readback attempts (default 1;
@@ -30,6 +32,8 @@
 #                  the readback must match that exact value. When no hook
 #                  result is available (recover, or claim-mode fallback), the
 #                  readback assignee must be one of these identities.
+#                  GC_SESSION_ID and GC_SESSION_NAME name only this session;
+#                  the others may be shared by several sessions.
 #
 # Drains are the SDK's decision. `--drain-ack` makes the hook acknowledge every
 # drain it is allowed to acknowledge (it claimed nothing) and report that in
@@ -50,7 +54,13 @@
 # federates its claim across the rig store and the city store and its result
 # does not name the store, so the SDK's id routing picks the store that owns
 # the bead. Ownership proof: exactly one record with the requested id, status
-# in_progress, gc.session_id == $GC_SESSION_ID, and the expected assignee.
+# in_progress, and the expected assignee; the atomic claim guarantees those
+# two fields. A gc.session_id naming another session disproves ownership. The
+# SDK stamps gc.session_id best-effort after the claim, so a missing stamp is
+# not disproof: a hook work result's exact assignee still proves the claim it
+# just made, and a pointer-derived bead is proven only when its assignee names
+# this session alone (GC_SESSION_ID or GC_SESSION_NAME); otherwise ownership
+# stays unproven (session_stamp_missing).
 #
 # Current-claim pointer: `gc hook current` exits 1 both when the session has
 # claimed nothing and when the lookup itself fails. The SDK distinguishes them
@@ -84,9 +94,15 @@
 #                    malformed_result (claim-mode fallback).
 #   CLAIM_UNKNOWN    jq_unavailable        jq is not installed; nothing ran.
 #                    readback_unavailable  the readback could not be read.
+#                    session_stamp_missing  a pointer-derived bead lacks
+#                                          gc.session_id and its assignee may
+#                                          be shared with other sessions.
 #                    helper_error          an unexpected helper failure (for
 #                                          example mktemp failed); the hook
 #                                          may already have claimed.
+#                    helper_interrupted    the helper was stopped by SIGTERM,
+#                                          SIGINT, or SIGHUP; the hook may
+#                                          already have claimed.
 #                    drain_ack_failed      a drain the SDK failed to acknowledge.
 #                    Pointer failures, alone in recover mode and as
 #                    <fallback>_<failure> in claim mode (for example
@@ -150,19 +166,36 @@ rejected() {
 }
 
 # on_exit removes the scratch directory and keeps the marker contract when
-# set -e stops the helper on an unexpected failure: that run ends in
-# CLAIM_UNKNOWN reason=helper_error, never in a bare exit status.
+# set -e stops the helper on an unexpected failure (CLAIM_UNKNOWN
+# reason=helper_error) or a signal stops it (reason=helper_interrupted): such a
+# run never ends in a bare exit status. Bash runs the EXIT trap with $? = 0
+# after an untrapped fatal signal, so on_signal records the signal and exits
+# non-zero itself. A trapped signal also makes bash wait for a running gc child
+# before the trap runs, so the scratch directory outlives the child's writes.
 TMP_DIR=""
+INTERRUPTED_BY=""
+on_signal() {
+  INTERRUPTED_BY="$1"
+  exit "$2"
+}
 on_exit() {
   local status=$?
   if [[ -n "$TMP_DIR" ]]; then rm -rf "$TMP_DIR"; fi
   if ((status != 0)) && [[ "$TERMINAL_MARKER_PRINTED" != 1 ]]; then
-    printf 'claim-work.sh: unexpected failure (exit %s); ownership is unproven\n' "$status" >&2
-    printf 'CLAIM_UNKNOWN reason=helper_error\n'
+    if [[ -n "$INTERRUPTED_BY" ]]; then
+      printf 'claim-work.sh: interrupted by %s; ownership is unproven\n' "$INTERRUPTED_BY" >&2
+      printf 'CLAIM_UNKNOWN reason=helper_interrupted\n'
+    else
+      printf 'claim-work.sh: unexpected failure (exit %s); ownership is unproven\n' "$status" >&2
+      printf 'CLAIM_UNKNOWN reason=helper_error\n'
+    fi
     exit "$EXIT_UNKNOWN"
   fi
 }
 trap on_exit EXIT
+trap 'on_signal SIGHUP 129' HUP
+trap 'on_signal SIGINT 130' INT
+trap 'on_signal SIGTERM 143' TERM
 
 GC_BIN="${GC_BIN:-gc}"
 GC_SESSION_ID="${GC_SESSION_ID:-}"
@@ -219,6 +252,12 @@ is_session_identity() {
   return 1
 }
 
+# is_session_unique_identity VALUE succeeds when VALUE names this session alone.
+is_session_unique_identity() {
+  [[ "$1" == "$GC_SESSION_ID" ]] && return 0
+  [[ -n "${GC_SESSION_NAME:-}" && "$1" == "$GC_SESSION_NAME" ]]
+}
+
 # verify_bead ID [EXACT_ASSIGNEE [CLOSED_REASON]] reads ID back from its owning
 # store and prints CLAIMED_BEAD_ID only when the record proves this session owns
 # it. With CLOSED_REASON (pointer-derived ids), a closed bead is this session's
@@ -254,11 +293,19 @@ verify_bead() {
     unknown "$closed_reason"
   fi
   [[ "$status" == in_progress ]] || rejected stale_status
-  [[ "$session_id" == "$GC_SESSION_ID" ]] || rejected foreign_session_id
+  if [[ -n "$session_id" && "$session_id" != "$GC_SESSION_ID" ]]; then
+    rejected foreign_session_id
+  fi
   if [[ -n "$exact_assignee" ]]; then
     [[ "$assignee" == "$exact_assignee" ]] || rejected foreign_assignee
   else
     is_session_identity "$assignee" || rejected foreign_assignee
+  fi
+  if [[ -z "$session_id" ]]; then
+    printf 'bead %s has no gc.session_id stamp; proving ownership from status and assignee\n' "$bead_id" >&2
+    if [[ -z "$exact_assignee" ]] && ! is_session_unique_identity "$assignee"; then
+      unknown session_stamp_missing
+    fi
   fi
 
   terminal_marker "CLAIMED_BEAD_ID=$bead_id"

@@ -27,11 +27,22 @@ the coordinator (the pack's mayor under its import binding, such as
 acknowledging a drain.
 
 A bead can therefore stay `in_progress` and assigned to a stopped polecat
-session after an unreadable readback. The coordinator's report mail names the
-session, rig, and helper output. Inspect the bead with
-`gc bd show <id>` (id-routed to the rig or city store), confirm the session is
-no longer working it, and then release or reassign the bead through the city's
-normal coordinator flow. The pack never does this automatically.
+session after any `CLAIM_UNKNOWN` or `CLAIM_REJECTED` that follows a hook run,
+not only an unreadable readback (`reason=readback_unavailable`): the hook may
+have claimed before the helper failed (`reason=helper_error`), was stopped by
+a signal (`reason=helper_interrupted`), or could not read the session's
+current-claim pointer (for example `reason=hook_failed_current_unavailable`).
+The coordinator's report mail names the session, rig, and helper output, but
+the output carries a bead id only when the helper reached a readback. When it
+has none, read the stopped session's pointer without claiming, either with
+`GC_SESSION_ID=<session-id> gc hook current --id-only` or from the
+`current_claim_bead_id` metadata of the session bead (`gc bd show
+<session-id> --json`). The pointer names the session's most recent claim and
+may be an older, closed bead, so check it against the time of the report.
+Inspect the bead with `gc bd show <id>` (id-routed to the rig or city store),
+confirm the session is no longer working it, and then release or reassign the
+bead through the city's normal coordinator flow. The pack never does this
+automatically.
 
 ## Rollout
 
@@ -89,5 +100,6 @@ Running sessions do not reload either revision, so handle any uncertain claim
 with the read-only `recover` check above while the helper is still present, or
 by reading the same fields from `gc bd show <id> --json`
 (`.[0].status`, `.[0].assignee`, and `.[0].metadata["gc.session_id"]`; the
-metadata key is the literal dotted string). Preserve valid in-progress claims;
+metadata key is the literal dotted string, and the SDK writes it best-effort,
+so an absent key is not evidence of another owner). Preserve valid in-progress claims;
 do not bulk unroute, reopen, or drain beads as part of rollback.
